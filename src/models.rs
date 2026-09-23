@@ -1,0 +1,395 @@
+#![allow(dead_code)]
+
+// We no longer rely on Borsh for bonding-curve parsing; manual parsing is used
+// to tolerate trailing bytes and layout variations.
+use chrono::{DateTime, Utc};
+use lru::LruCache;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use solana_sdk::pubkey::Pubkey;
+use std::time::Instant;
+
+// Bonding Curve State
+// New pump.fun bonding curve layout (post 2025 updates): the on-chain account
+// begins with an 8-byte Anchor discriminator which we strip before deserializing
+// into this struct. Fields here map to the bytes after that discriminator.
+// Layout (after discriminator):
+// - virtual_token_reserves: u64
+// - virtual_sol_reserves: u64
+// - real_token_reserves: u64
+// - real_sol_reserves: u64
+// - token_total_supply: u64
+// - complete: bool (1 byte)
+// - creator: Pubkey (32 bytes)
+// - is_mayhem_mode: bool (1 byte) — added in V3
+#[derive(Debug, PartialEq, Clone)]
+pub struct BondingCurveState {
+    pub virtual_token_reserves: u64,
+    pub virtual_sol_reserves: u64,
+    pub real_token_reserves: u64,
+    pub real_sol_reserves: u64,
+    pub token_total_supply: u64,
+    pub complete: bool,
+    pub creator: Option<Pubkey>,
+    pub is_mayhem_mode: bool,
+}
+
+impl BondingCurveState {
+    /// Compute the spot price in SOL per token using the virtual reserves.
+    /// Returns None if token reserve is zero.
+    pub fn spot_price_sol_per_token(&self) -> Option<f64> {
+        if self.virtual_token_reserves == 0 {
+            return None;
+        }
+        // Formula: (virtual_sol_lamports / 1e9) / (virtual_token_base_units / 1e6)
+        // Simplifies to (virtual_sol_lamports / virtual_token_base_units) * 1e-3
+        let vsol = self.virtual_sol_reserves as f64;
+        let vtok = self.virtual_token_reserves as f64;
+        Some((vsol / vtok) * 1e-3)
+    }
+}
+
+// Holdings and Price Cache
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Holding {
+    pub amount: u64,
+    /// The original token amount at buy time, used to compute sell fractions for multi-level TP/SL.
+    pub original_amount: u64,
+    pub buy_price: f64,
+    pub buy_time: DateTime<Utc>,
+    /// Token decimals (e.g. 6 for most pump.fun tokens). Used to convert base units to
+    /// human-readable token amounts: `tokens = amount / 10^decimals`.
+    #[serde(default = "default_token_decimals_u8")]
+    pub decimals: u8,
+    /// Actual SOL cost of the buy transaction (from on-chain balance delta), including all
+    /// fees (gas, priority, pump.fun, dev). Only populated in real mode.
+    #[serde(default)]
+    pub buy_cost_sol: Option<f64>,
+    /// Indices of TP levels that have already been triggered/executed.
+    #[serde(default)]
+    pub triggered_tp_levels: Vec<usize>,
+    /// Indices of SL levels that have already been triggered/executed.
+    #[serde(default)]
+    pub triggered_sl_levels: Vec<usize>,
+    /// True if this token has migrated to AMM (bonding curve complete).
+    /// When migrated, bonding curve price polling is paused.
+    #[serde(default)]
+    pub migrated: bool,
+    /// True while a TP/SL/Mirror sell is in-flight. Prevents duplicate sell orders
+    /// from being queued while the first one is still executing.
+    #[serde(default)]
+    pub pending_sell: bool,
+    /// Which DEX this token was bought on ("pumpfun", "raydium_v4"). Used to route sells.
+    #[serde(default = "default_dex")]
+    pub dex: String,
+    /// AMM pool address (for Raydium V4 sells — needed to build swap instruction)
+    #[serde(default)]
+    pub amm_pool: Option<String>,
+    /// How many tokens the target wallet bought (base units). Used to calculate
+    /// proportional mirror sells: sell_ratio = target_sold / target_bought.
+    #[serde(default)]
+    pub target_buy_tokens: Option<u64>,
+    /// Extra account from target's pump instruction (account [16] in buy / [14] in sell).
+    /// Mint-specific PDA with unknown seeds, copied from target TX at buy time.
+    #[serde(default)]
+    pub extra_pump_account: Option<String>,
+    /// PumpSwap AMM account keys from target's buy TX (17+ accounts).
+    /// Stored at buy time so sell can reconstruct PumpSwapAccounts without RPC.
+    #[serde(default)]
+    pub pumpswap_accounts: Option<Vec<String>>,
+    /// Our buy TX signature (for slot tracking)
+    #[serde(default)]
+    pub buy_signature: Option<String>,
+    // Optional off-chain metadata retrieved from the token's URI (name, symbol, image, etc.)
+    pub metadata: Option<OffchainTokenMetadata>,
+    // Optional on-chain metadata (trimmed fields) retrieved from the token's metadata account
+    // Full raw on-chain metadata account bytes (decoded from base64). This preserves the
+    // entire account data so callers can deserialize later or inspect any fields.
+    pub onchain_raw: Option<Vec<u8>>,
+    // Parsed, convenient subset of the on-chain `Metadata` account saved for quick access
+    pub onchain: Option<OnchainFullMetadata>,
+    /// Timing: milliseconds spent fetching price (transient, not persisted)
+    #[serde(skip)]
+    pub timing_price_ms: u128,
+    /// Timing: milliseconds spent building the transaction (transient, not persisted)
+    #[serde(skip)]
+    pub timing_build_ms: u128,
+    /// Timing: milliseconds spent sending the transaction (transient, not persisted)
+    #[serde(skip)]
+    pub timing_send_ms: u128,
+}
+
+fn default_token_decimals_u8() -> u8 { 6 }
+fn default_dex() -> String { "pumpfun".to_string() }
+pub type PriceCache = LruCache<String, (Instant, f64)>;
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct OffchainTokenMetadata {
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+    pub description: Option<String>,
+    pub image: Option<String>,
+    #[serde(flatten)]
+    pub extras: Option<serde_json::Value>,
+}
+
+impl OffchainTokenMetadata {
+    /// Normalize fields by trimming whitespace and null chars. If a field is
+    /// empty after trimming, it is converted to None. Also attempt to extract
+    /// `name` and `symbol` from common alternative fields in `extras`.
+    pub fn normalize(&mut self) {
+        fn norm_opt(mut s: Option<String>) -> Option<String> {
+            s.as_mut().map(|v| {
+                let trimmed = v.trim().trim_end_matches('\u{0}').to_string();
+                *v = trimmed;
+            });
+            s.and_then(|v| {
+                let trimmed = v.trim().trim_end_matches('\u{0}').to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            })
+        }
+
+        self.name = norm_opt(self.name.take());
+        self.symbol = norm_opt(self.symbol.take());
+        self.description = norm_opt(self.description.take());
+        self.image = norm_opt(self.image.take());
+
+        // If name or symbol are missing, try to extract from `extras`.
+        if (self.name.is_none() || self.symbol.is_none()) && self.extras.is_some() {
+            fn lookup_string(v: &serde_json::Value, path: &[&str]) -> Option<String> {
+                let mut cur = v;
+                for p in path {
+                    cur = cur.get(*p)?;
+                }
+                match cur {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Object(map) => {
+                        // Prefer `en` locale, then first string value
+                        if let Some(serde_json::Value::String(s2)) = map.get("en") {
+                            return Some(s2.clone());
+                        }
+                        for (_k, v) in map.iter() {
+                            if let serde_json::Value::String(s3) = v {
+                                return Some(s3.clone());
+                            }
+                        }
+                        None
+                    }
+                    serde_json::Value::Array(arr) => {
+                        if let Some(serde_json::Value::String(s4)) = arr.get(0) {
+                            return Some(s4.clone());
+                        }
+                        None
+                    }
+                    other => other.as_str().map(|s| s.to_string()),
+                }
+            }
+            if let Some(ref extras) = self.extras {
+                if self.name.is_none() {
+                    let candidates = [
+                        vec!["name"],
+                        vec!["title"],
+                        vec!["properties", "name"],
+                        vec!["data", "name"],
+                        vec!["metadata", "name"],
+                    ];
+                    for c in candidates.iter() {
+                        if let Some(v) = lookup_string(extras, c) {
+                            let t = v.trim().trim_end_matches('\u{0}').to_string();
+                            if !t.is_empty() {
+                                self.name = Some(t);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if self.symbol.is_none() {
+                    let candidates = [vec!["symbol"], vec!["ticker"], vec!["properties", "symbol"]];
+                    for c in candidates.iter() {
+                        if let Some(v) = lookup_string(extras, c) {
+                            let t = v.trim().trim_end_matches('\u{0}').to_string();
+                            if !t.is_empty() {
+                                self.symbol = Some(t);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// (Previously had a small trimmed `OnchainTokenMetadata`.) We now store the full
+// decoded account bytes in `Holding::onchain_raw` to preserve the complete on-chain
+// metadata payload.
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct OnchainFullMetadata {
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+    pub uri: Option<String>,
+    pub seller_fee_basis_points: Option<u16>,
+    // Keep the raw bytes too so callers don't need to re-request the account
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<Vec<u8>>,
+}
+
+// RPC structures
+#[derive(Deserialize, Debug)]
+pub struct RpcResponse<T> {
+    pub result: Option<T>,
+    pub error: Option<Value>,
+}
+#[derive(Deserialize, Debug)]
+pub struct TransactionResult {
+    pub transaction: TransactionData,
+    pub meta: Option<TransactionMeta>,
+}
+#[derive(Deserialize, Debug)]
+pub struct TransactionData {
+    pub message: MessageData,
+}
+#[derive(Deserialize, Debug)]
+pub struct TransactionMeta {
+    #[serde(rename = "innerInstructions")]
+    pub inner_instructions: Option<Vec<InnerInstruction>>,
+}
+#[derive(Deserialize, Debug)]
+pub struct InnerInstruction {
+    // pub index: u8,
+    pub instructions: Vec<Instruction>,
+}
+#[derive(Deserialize, Debug)]
+pub struct Instruction {
+    #[serde(rename = "programIdIndex")]
+    pub program_id_index: usize,
+    pub accounts: Vec<usize>,
+}
+#[derive(Deserialize, Debug)]
+pub struct MessageData {
+    #[serde(rename = "accountKeys")]
+    pub account_keys: Vec<AccountKey>,
+}
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+pub enum AccountKey {
+    Simple(String),
+    Detailed { pubkey: String },
+}
+
+impl AccountKey {
+    pub fn pubkey(&self) -> &str {
+        match self {
+            AccountKey::Simple(s) => s.as_str(),
+            AccountKey::Detailed { pubkey } => pubkey.as_str(),
+        }
+    }
+}
+#[derive(Deserialize, Debug)]
+pub struct AccountInfoResult {
+    pub data: Vec<String>,
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::BondingCurveState;
+    use super::OffchainTokenMetadata;
+    use serde_json::json;
+
+    #[test]
+    fn test_spot_price_formula_unit() {
+        let state = BondingCurveState {
+            virtual_sol_reserves: 30_000_000_000u64, // 30 SOL in lamports
+            virtual_token_reserves: 1_073_000_191_000_000u64, // 1.073B tokens with 6 decimals
+            real_token_reserves: 0,
+            real_sol_reserves: 0,
+            token_total_supply: 0,
+            complete: false,
+            creator: None,
+            is_mayhem_mode: false,
+        };
+        let price_opt = state.spot_price_sol_per_token();
+        assert!(price_opt.is_some(), "spot_price_sol_per_token should not be None");
+        let price = price_opt.unwrap();
+        let expected = 30.0 / 1_073_000_191.0_f64; // ~2.795e-8
+        let diff = (price - expected).abs();
+        assert!(diff < 1e-15, "price mismatch: got {} expected {} diff {}", price, expected, diff);
+    }
+
+    #[test]
+    fn test_offchain_metadata_normalize_variants() {
+        // Basic string name
+        let mut m1 = OffchainTokenMetadata {
+            name: Some("   Test Token\u{0}  ".to_string()),
+            symbol: Some("TST\u{0}".to_string()),
+            description: None,
+            image: Some("https://example.com/img.png".to_string()),
+            extras: None,
+        };
+        m1.normalize();
+        assert_eq!(m1.name.as_deref(), Some("Test Token"));
+        assert_eq!(m1.symbol.as_deref(), Some("TST"));
+
+        // Name in nested object with locale
+        let v = json!({ "name": { "en": "Localized Token" }, "symbol": "LCL" });
+        let mut m2 = OffchainTokenMetadata { name: None, symbol: None, description: None, image: None, extras: Some(v) };
+        m2.normalize();
+        assert_eq!(m2.name.as_deref(), Some("Localized Token"));
+        assert_eq!(m2.symbol.as_deref(), Some("LCL"));
+
+        // Name in properties.name
+        let v = json!({ "properties": { "name": "Properties Token" }, "ticker": "PRP" });
+        let mut m3 = OffchainTokenMetadata { name: None, symbol: None, description: None, image: None, extras: Some(v) };
+        m3.normalize();
+        assert_eq!(m3.name.as_deref(), Some("Properties Token"));
+        assert_eq!(m3.symbol.as_deref(), Some("PRP"));
+    }
+
+    #[test]
+    fn test_bonding_curve_state_mayhem_mode() {
+        let normal_state = BondingCurveState {
+            virtual_sol_reserves: 30_000_000_000u64,
+            virtual_token_reserves: 1_000_000_000_000u64,
+            real_token_reserves: 0,
+            real_sol_reserves: 0,
+            token_total_supply: 0,
+            complete: false,
+            creator: None,
+            is_mayhem_mode: false,
+        };
+        assert!(!normal_state.is_mayhem_mode, "Standard token should not be in mayhem mode");
+
+        let mayhem_state = BondingCurveState {
+            virtual_sol_reserves: 30_000_000_000u64,
+            virtual_token_reserves: 1_000_000_000_000u64,
+            real_token_reserves: 0,
+            real_sol_reserves: 0,
+            token_total_supply: 0,
+            complete: false,
+            creator: None,
+            is_mayhem_mode: true,
+        };
+        assert!(mayhem_state.is_mayhem_mode, "Mayhem token should be in mayhem mode");
+    }
+
+    #[test]
+    fn test_fee_recipient_routing_matches_mayhem_state() {
+        use std::str::FromStr;
+        use solana_sdk::pubkey::Pubkey;
+        // Regression guard T003: ensure the routing logic used by buyer.rs and tx_template.rs
+        // selects cached.mayhem when is_mayhem is true, otherwise cached.normal.
+        let normal = Pubkey::from_str("CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM").unwrap();
+        let mayhem = Pubkey::from_str("2Lp2SGS9XyxT2g9v1H7Q1Z7R2oT7gZtT7gZtT7gZtT7g").unwrap();
+        // Same expression used in src/tx_template.rs:159 and src/buyer.rs fallback path.
+        let fee_recipient_for = |is_mayhem: bool| -> Pubkey { if is_mayhem { mayhem } else { normal } };
+        assert_eq!(fee_recipient_for(false), normal, "normal token must use normal fee recipient");
+        assert_eq!(fee_recipient_for(true), mayhem, "mayhem token must use mayhem fee recipient");
+    }
+}

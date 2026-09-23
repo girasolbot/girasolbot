@@ -1,0 +1,43 @@
+# Example configuration for the Same Block Sniper (Girasol)
+# Copy this file to config.toml and fill in your real values.
+# NEVER commit config.toml with real keys or RPC URLs.
+
+# ── Required fields (no defaults) ──
+solana_ws_urls = ["wss://placeholder.example.com:8900/"]
+solana_rpc_urls = ["https://placeholder.example.com:8899"]
+# Wallet whose transactions are copied (base58 pubkey)
+target_wallet = "TargetWalletPlaceholder11111111111111111111111"
+pump_fun_program = "PlaceholderPumpFunProgram11111111111111111111111"
+metadata_program = "PlaceholderMetadataProgram1111111111111111111"
+timeout_secs = 30
+cache_capacity = 1024
+price_cache_ttl_secs = 60
+
+# ── Listener mode ──
+# "shreds" (default, fastest), "websocket", or "geyser"
+listener_mode = "shreds"
+
+# ── API-key panel (optional) ──
+# Enabled only when PANEL_AUTH_TOKEN env var is set (min 8 chars).
+# Bind address: SNIPER_PANEL_BIND (default 127.0.0.1:8078, loopback only).
+# Vault file: SNIPER_DATA_DIR/apikeys.enc.json (AES-256-GCM at rest).
+# Keys set via the panel take precedence over values in this file.
+
+# ── Dry-run safety ──
+# Set to false only when you are ready for real trades.
+dry_run = true
+
+# ── Take-profit & stop-loss levels ──
+# Must have exactly 2 tp_levels and 1 sl_level to pass load_example_config test.
+
+[[tp_levels]]
+trigger_percent = 30.0
+sell_percent = 50.0
+
+[[tp_levels]]
+trigger_percent = 100.0
+sell_percent = 50.0
+
+[[sl_levels]]
+trigger_percent = -20.0
+sell_percent = 100.0

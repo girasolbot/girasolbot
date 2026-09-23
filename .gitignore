@@ -1,0 +1,29 @@
+# Build artifacts
+target/
+
+# Logs
+*.log
+logs/
+
+# Runtime / private data — NEVER commit
+config.toml
+positions.json
+data/
+*.pem
+*.tar
+
+# Keypairs / wallet files
+*.json.bak
+id.json
+keypair*.json
+wallet*.json
+!config.example.toml
+
+# Vault (encrypted API-key store)
+data/apikeys.enc.json
+data/.apikeys-secret
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.cargo-home/
