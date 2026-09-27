@@ -7,6 +7,8 @@
 
 **Official links:** [Website](https://girasolbot.com) · [X](https://x.com/girasolbot) · [Support](https://t.me/girasolsupportbot) · [Security](SECURITY.md) · [Product status](docs/PRODUCT_STATUS.md)
 
+Dependency advisories and explicitly deferred upstream migrations are tracked in [Security advisories](docs/SECURITY_ADVISORIES.md).
+
 > [!WARNING]
 > **No official Girasol token exists yet.** As of 27 September 2026, any mint, pool, presale or contract claiming affiliation with Girasol is fraudulent. The verified address will be published simultaneously on the official website, this repository and [@girasolbot](https://x.com/girasolbot) after deployment.
 

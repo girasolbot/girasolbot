@@ -9,6 +9,8 @@ for relative_path in [
     "CHANGELOG.md",
     "docs/THREAT_MODEL.md",
     "docs/PRODUCT_STATUS.md",
+    "docs/SECURITY_ADVISORIES.md",
+    ".cargo/audit.toml",
     ".github/workflows/ci.yml",
     ".github/ISSUE_TEMPLATE/bug_report.yml",
     ".github/ISSUE_TEMPLATE/security.yml",

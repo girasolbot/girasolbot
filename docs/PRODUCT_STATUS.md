@@ -52,3 +52,5 @@ No official Girasol token exists as of 27 September 2026. See [girasolbot.com/to
 ## Current quality gate note
 
 Build and tests are blocking CI checks. Formatting and strict Clippy are initially visible but non-blocking because the imported public source predates enforced repository-wide style. They should become blocking after a dedicated formatting and warning-cleanup change, rather than mixing a large unrelated code rewrite into the trust hardening release.
+
+Current dependency-audit status, including explicitly deferred Solana 2.x advisories, is published in [SECURITY_ADVISORIES.md](SECURITY_ADVISORIES.md).
