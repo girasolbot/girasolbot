@@ -1,0 +1,14 @@
+name: Security question
+description: Non-sensitive security hardening question only
+title: "security: "
+labels: [security]
+body:
+  - type: markdown
+    attributes:
+      value: Do not disclose exploitable vulnerabilities here. Follow SECURITY.md for private reporting.
+  - type: textarea
+    id: question
+    attributes:
+      label: Non-sensitive question
+    validations:
+      required: true

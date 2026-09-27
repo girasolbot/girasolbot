@@ -1,14 +1,24 @@
-# 🌻 girasol
+# 🌻 Girasol
 
-> same-block copytrade for solana, rust-built
+> Wallet intelligence with optional controlled copy and strategy execution.
+
+[![CI](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml/badge.svg)](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+**Official links:** [Website](https://girasolbot.com) · [X](https://x.com/girasolbot) · [Support](https://t.me/girasolsupportbot) · [Security](SECURITY.md) · [Product status](docs/PRODUCT_STATUS.md)
+
+> [!WARNING]
+> **No official Girasol token exists yet.** As of 27 September 2026, any mint, pool, presale or contract claiming affiliation with Girasol is fraudulent. The verified address will be published simultaneously on the official website, this repository and [@girasolbot](https://x.com/girasolbot) after deployment.
 
 ![girasol hero](docs/hero.jpg)
 
-girasol watches a wallet you pick and mirrors its swaps in the same block. it uses shredstream/geyser or websocket for detection, pre-built transaction templates, and concurrent SWQoS submission to keep latency low end-to-end. your private keys stay in an encrypted local vault — and you can run it in dry-run mode before letting it touch real funds.
+Girasol watches a wallet selected by the operator and can mirror supported swaps under explicit risk controls. It uses ShredStream/Geyser or WebSocket detection, pre-built transaction templates and concurrent provider submission to reduce end-to-end latency. Private keys stay in an encrypted local vault, and dry-run mode is enabled by default.
+
+Same-block execution is an engineering objective affected by network conditions, provider latency, validators, transaction construction, priority fees and competing traffic. **It is not a guarantee.** See [Product status](docs/PRODUCT_STATUS.md) for the distinction between public, environment-dependent and experimental capabilities.
 
 - 🔒 your keys, your vault
 - 🧪 dry-run first
-- ⚡ same-block execution
+- ⚡ low-latency execution pipeline
 
 ---
 
@@ -148,7 +158,7 @@ config.example.toml   example configuration (placeholders only)
 ## Quick start
 
 ```bash
-git clone <repo-url> girasol && cd girasol
+git clone https://github.com/girasolbot/girasolbot.git girasol && cd girasol
 cp config.example.toml config.toml
 # edit config.toml: set your target_wallet, RPC/WSS URLs
 cargo run --release          # dry-run mode (default)
@@ -173,6 +183,8 @@ your entire deposit. You are solely responsible for complying with the laws
 of your jurisdiction and with the terms of service of any RPC or SWQoS
 provider you use. Nothing in this repository is financial advice, and no
 statement here is a promise of performance or profit.
+
+Read the public [Trading Risk Disclosure](https://girasolbot.com/risk) before enabling real execution.
 
 ## License
 

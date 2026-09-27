@@ -1,0 +1,40 @@
+name: Bug report
+description: Report reproducible incorrect behavior without secrets
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Never include private keys, seed phrases, vault passphrases, API credentials or private endpoints.
+  - type: input
+    id: version
+    attributes:
+      label: Commit or release
+      placeholder: Commit SHA or release tag
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Execution mode
+      options: [Dry-run, Real mode, Not applicable]
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps and sanitized logs
+    validations:
+      required: true
