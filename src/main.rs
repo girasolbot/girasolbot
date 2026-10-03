@@ -23,6 +23,8 @@ mod swqos_sender;
 mod quic_sender;
 mod pumpswap;
 mod rpc;
+mod rug_guard;
+mod replay;
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
@@ -102,6 +104,60 @@ impl Stats {
         info!("  Sell failures:   {}", sell_fails);
         info!("  Realized PnL:    {:+.9} SOL", pnl);
         info!("========================================");
+    }
+}
+
+/// Returns Ok(()) when the mint passes the pre-buy token safety screen and safer-sniping
+/// gates; Err(reason) when the buy must be rejected. Also checks the hot-reloadable blacklist.
+async fn pre_buy_safety_check(
+    mint: &str,
+    sol_to_spend: f64,
+    token_amount: u64,
+    price_sol_per_token: f64,
+    blacklist: &crate::rug_guard::Blacklist,
+    rpc_client: &Arc<RpcClient>,
+    settings: &Arc<Settings>,
+) -> Result<(), String> {
+    if blacklist.contains(mint) {
+        return Err("mint is blacklisted".to_string());
+    }
+
+    let report = match crate::rpc::fetch_token_safety_report(mint, rpc_client, settings).await {
+        Ok(report) => report,
+        Err(error) => {
+            warn!(
+                "Token safety report unavailable for {}: {} — allowing buy",
+                mint, error
+            );
+            return Ok(());
+        }
+    };
+
+    match crate::rug_guard::evaluate_safety(&report, settings) {
+        crate::rug_guard::ScreenDecision::Reject(message) => return Err(message),
+        crate::rug_guard::ScreenDecision::Warn(message) => {
+            warn!("Token safety warning for {}: {}", mint, message);
+        }
+        crate::rug_guard::ScreenDecision::Allow => {}
+    }
+
+    let liquidity_sol = crate::rpc::fetch_bonding_curve_state(mint, rpc_client, settings)
+        .await
+        .ok()
+        .map(|state| crate::rug_guard::estimate_pumpfun_liquidity_sol(state.real_sol_reserves));
+    match crate::rug_guard::check_safer_sniping_gates(
+        sol_to_spend,
+        token_amount,
+        liquidity_sol,
+        price_sol_per_token,
+        settings,
+    ) {
+        crate::rug_guard::ScreenDecision::Reject(message) => Err(message),
+        crate::rug_guard::ScreenDecision::Warn(message) => {
+            warn!("Safer-sniping warning for {}: {}", mint, message);
+            Ok(())
+        }
+        crate::rug_guard::ScreenDecision::Allow => Ok(()),
     }
 }
 
@@ -335,6 +391,11 @@ async fn main() -> Result<()> {
     } else {
         info!("SWQoS concurrent send: OFF (using legacy helius_sender)");
     }
+
+    let blacklist = match settings.blacklist_path.as_deref() {
+        Some(path) => crate::rug_guard::Blacklist::load_from_file(path),
+        None => crate::rug_guard::Blacklist::empty(),
+    };
 
     // Pre-warm HTTP connection pool (establishes TCP+TLS before first trade)
     {
@@ -629,6 +690,7 @@ async fn main() -> Result<()> {
                 let buy_template = buy_template.clone();
                 let buy_keypair = buy_keypair.clone();
                 let buy_simulate_keypair = buy_simulate_keypair.clone();
+                let blacklist = blacklist.clone();
                 tokio::spawn(async move {
                 // Load latest settings (hot-reloadable)
                 if let Err(e) = async {
@@ -688,10 +750,77 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Fixed buy amount from config (not mirror_percent)
-                let sol_to_spend = current_settings.buy_amount;
+                // Copy-mode: mirror (legacy fixed/mirror_percent) vs replay (target's real size).
+                let use_replay = crate::replay::should_use_replay(&current_settings.copy_mode);
+                let replay_size = if use_replay {
+                    match (detected.sol_amount, detected.token_amount) {
+                        (Some(target_sol), Some(target_tokens)) if target_sol > 0.0 => {
+                            crate::replay::compute_replay_size(
+                                (target_sol * 1e9).round() as u64,
+                                target_tokens,
+                                current_settings.mirror_percent,
+                                current_settings.buy_amount,
+                                current_settings.max_position_sol,
+                                &current_settings.replay_size_mode,
+                            )
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                let sol_to_spend = match &replay_size {
+                    Some(size) => size.sol_lamports as f64 / 1e9,
+                    None => current_settings.buy_amount,
+                };
+
+                // Effective slippage: replay keeps the operator's risk setting.
+                let effective_slippage_bps = current_settings.slippage_bps;
+
+                if use_replay {
+                    match &replay_size {
+                        Some(size) => info!(
+                            "REPLAY MODE ({}): target {:.4} SOL / {} tokens -> our {:.4} SOL / {} tokens | sig: {}",
+                            current_settings.replay_size_mode,
+                            detected.sol_amount.unwrap_or(0.0),
+                            detected.token_amount.unwrap_or(0),
+                            sol_to_spend,
+                            size.token_amount,
+                            &detected.signature[..std::cmp::min(16, detected.signature.len())],
+                        ),
+                        None => warn!(
+                            "REPLAY requested but target amounts unavailable for {} — falling back to buy_amount {:.4} SOL",
+                            mint, sol_to_spend
+                        ),
+                    }
+                }
                 if let Some(target_sol) = detected.sol_amount {
-                    info!("Target spent {:.4} SOL, we buy fixed {:.4} SOL", target_sol, sol_to_spend);
+                    if !use_replay {
+                        info!("Target spent {:.4} SOL, we buy fixed {:.4} SOL", target_sol, sol_to_spend);
+                    }
+                }
+
+                let entry_price = match detected.sol_amount {
+                    Some(target_sol) if detected.token_amount.unwrap_or(0) > 0 => {
+                        target_sol / (detected.token_amount.unwrap_or(1) as f64 / 1e6)
+                    }
+                    _ => 0.0,
+                };
+                if let Err(reason) = pre_buy_safety_check(
+                    &mint,
+                    sol_to_spend,
+                    detected.token_amount.unwrap_or(0),
+                    entry_price,
+                    &blacklist,
+                    &rpc_client,
+                    &current_settings,
+                )
+                .await
+                {
+                    warn!("SKIP buy for {}: safety screen rejected — {}", mint, reason);
+                    stats.total_skipped.fetch_add(1, Ordering::Relaxed);
+                    return Ok::<(), anyhow::Error>(());
                 }
 
                 info!(
@@ -740,12 +869,12 @@ async fn main() -> Result<()> {
                     };
                     let raydium_build_result = if detected.dex == copy_engine::DexType::RaydiumCpmm {
                         raydium_cpmm::build_buy_instructions(
-                            amm_pool, &mint, sol_to_spend, current_settings.slippage_bps,
+                            amm_pool, &mint, sol_to_spend, effective_slippage_bps,
                             &payer.pubkey(), &rpc_client, &current_settings,
                         ).await
                     } else {
                         raydium_v4::build_buy_instructions(
-                            amm_pool, &mint, sol_to_spend, current_settings.slippage_bps,
+                            amm_pool, &mint, sol_to_spend, effective_slippage_bps,
                             &payer.pubkey(), &rpc_client, &current_settings,
                         ).await
                     };
@@ -759,6 +888,8 @@ async fn main() -> Result<()> {
                                     original_amount: 0,
                                     buy_price: 0.0,
                                     buy_time: chrono::Utc::now(),
+                                    high_watermark: None,
+                                    entry_liquidity_sol: None,
                                     decimals: 9,
                                     buy_cost_sol: None,
                                     metadata: None,
@@ -813,6 +944,8 @@ async fn main() -> Result<()> {
                                     original_amount: 0,
                                     buy_price: 0.0,
                                     buy_time: chrono::Utc::now(),
+                                    high_watermark: None,
+                                    entry_liquidity_sol: None,
                                     decimals: 9,
                                     buy_cost_sol: Some(sol_to_spend),
                                     metadata: None,
@@ -859,8 +992,15 @@ async fn main() -> Result<()> {
                     let quote_mint_str = &target_accts[4];
 
                     // Estimate token amount: scale proportionally from target's trade
-                    let our_sol_lamports = (sol_to_spend * 1e9) as u64;
-                    let our_token_amount = if let (Some(target_sol), Some(target_tokens)) = (detected.sol_amount, detected.token_amount) {
+                    let our_sol_lamports = replay_size
+                        .as_ref()
+                        .map(|size| size.sol_lamports)
+                        .unwrap_or_else(|| (sol_to_spend * 1e9) as u64);
+                    let our_token_amount = if let Some(size) = &replay_size {
+                        size.token_amount
+                    } else if let (Some(target_sol), Some(target_tokens)) =
+                        (detected.sol_amount, detected.token_amount)
+                    {
                         if target_sol > 0.0 && target_tokens > 0 {
                             let ratio = sol_to_spend / target_sol;
                             let scaled = (target_tokens as f64 * ratio * 0.90) as u64; // 10% safety haircut
@@ -883,7 +1023,7 @@ async fn main() -> Result<()> {
 
                     match pumpswap::build_buy_instructions(
                         &pumpswap_accts, our_sol_lamports, our_token_amount,
-                        &payer.pubkey(), current_settings.slippage_bps,
+                        &payer.pubkey(), effective_slippage_bps,
                     ) {
                         Ok(instructions) => {
                             if !is_real {
@@ -893,6 +1033,8 @@ async fn main() -> Result<()> {
                                     original_amount: 0,
                                     buy_price: 0.0,
                                     buy_time: chrono::Utc::now(),
+                                    high_watermark: None,
+                                    entry_liquidity_sol: None,
                                     decimals: 6,
                                     buy_cost_sol: None,
                                     metadata: None,
@@ -946,6 +1088,8 @@ async fn main() -> Result<()> {
                                     original_amount: 0,
                                     buy_price: 0.0,
                                     buy_time: chrono::Utc::now(),
+                                    high_watermark: None,
+                                    entry_liquidity_sol: None,
                                     decimals: 6,
                                     buy_cost_sol: Some(sol_to_spend),
                                     metadata: None,
@@ -999,6 +1143,15 @@ async fn main() -> Result<()> {
                         }
                         let buy_ms = buy_start.elapsed().as_millis();
                         let pipeline_ms = ws_received_at.elapsed().as_millis();
+                        if use_replay {
+                            let latency_ms = crate::replay::replay_latency_ms(0, pipeline_ms);
+                            info!(
+                                "REPLAY LATENCY: target sig {} -> our buy completed in {}ms (target_slot={})",
+                                &detected.signature[..std::cmp::min(16, detected.signature.len())],
+                                latency_ms,
+                                detected.slot.unwrap_or(0),
+                            );
+                        }
                         stats.total_buys.fetch_add(1, Ordering::Relaxed);
                         let target_slot = detected.slot.unwrap_or(0);
                         // Query our TX slot asynchronously (best effort)

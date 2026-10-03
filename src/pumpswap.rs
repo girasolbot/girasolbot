@@ -237,8 +237,13 @@ pub fn parse_pumpswap_instruction(
         return None;
     }
 
-    let data_b64 = instruction.get("data")?.as_str()?;
-    let data = base64::engine::general_purpose::STANDARD.decode(data_b64).ok()?;
+    let data_str = instruction.get("data")?.as_str()?;
+    // Geyser/jsonParsed uses base64; raw getTransaction "json" uses base58.
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(data_str)
+        .ok()
+        .filter(|decoded| decoded.len() >= 24)
+        .or_else(|| bs58::decode(data_str).into_vec().ok())?;
     if data.len() < 24 {
         return None; // discriminator (8) + amount (8) + amount (8)
     }
@@ -286,4 +291,115 @@ pub fn parse_pumpswap_instruction(
         token_amount,
         sol_amount,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+    fn account_keys() -> Vec<String> {
+        let mut keys: Vec<String> = (0..17)
+            .map(|_| Pubkey::new_unique().to_string())
+            .collect();
+        keys[16] = PUMPSWAP_PROGRAM.to_string();
+        keys
+    }
+
+    fn encoded_instruction(discriminator: [u8; 8], account_count: usize) -> serde_json::Value {
+        let mut data = discriminator.to_vec();
+        data.extend(123_u64.to_le_bytes());
+        data.extend(456_u64.to_le_bytes());
+
+        json!({
+            "programIdIndex": 16,
+            "accounts": (0..account_count).collect::<Vec<_>>(),
+            "data": bs58::encode(data).into_string(),
+        })
+    }
+
+    #[test]
+    fn parse_pumpswap_buy_base58() {
+        let keys = account_keys();
+        let parsed = parse_pumpswap_instruction(
+            &encoded_instruction(BUY_DISCRIMINATOR, 17),
+            16,
+            &keys,
+        )
+        .expect("base58 PumpSwap buy should parse");
+
+        assert!(parsed.0);
+        assert_eq!(parsed.1.token_amount, 123);
+        assert_eq!(parsed.1.pool, keys[0]);
+        assert_eq!(parsed.1.base_mint, keys[3]);
+    }
+
+    #[test]
+    fn parse_pumpswap_sell_base58() {
+        let keys = account_keys();
+        let parsed = parse_pumpswap_instruction(
+            &encoded_instruction(SELL_DISCRIMINATOR, 17),
+            16,
+            &keys,
+        )
+        .expect("base58 PumpSwap sell should parse");
+
+        assert!(!parsed.0);
+        assert_eq!(parsed.1.token_amount, 123);
+        assert_eq!(parsed.1.pool, keys[0]);
+        assert_eq!(parsed.1.base_mint, keys[3]);
+    }
+
+    #[test]
+    fn parse_pumpswap_rejects_wrong_program() {
+        let keys = account_keys();
+        assert!(parse_pumpswap_instruction(
+            &encoded_instruction(BUY_DISCRIMINATOR, 17),
+            15,
+            &keys,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parse_pumpswap_rejects_short_accounts() {
+        let keys = account_keys();
+        assert!(parse_pumpswap_instruction(
+            &encoded_instruction(BUY_DISCRIMINATOR, 16),
+            16,
+            &keys,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn build_sell_uses_min_sol_out() {
+        let payer = Pubkey::new_unique();
+        let mut accounts: Vec<String> = (0..17)
+            .map(|_| Pubkey::new_unique().to_string())
+            .collect();
+        accounts[11] = TOKEN_PROGRAM.to_string();
+        accounts[12] = TOKEN_PROGRAM.to_string();
+        let target = PumpSwapAccounts {
+            pool: accounts[0].clone(),
+            base_mint: accounts[3].clone(),
+            quote_mint: accounts[4].clone(),
+            accounts,
+            token_amount: 1,
+            sol_amount: 2,
+        };
+        let min_sol_out = 987_654_321_u64;
+
+        let instructions = build_sell_instructions(&target, 42, min_sol_out, &payer)
+            .expect("valid PumpSwap accounts should build");
+        let sell = instructions.last().expect("sell instruction");
+
+        assert!(sell.data.ends_with(&min_sol_out.to_le_bytes()));
+        assert!(sell
+            .accounts
+            .iter()
+            .any(|account| account.pubkey == payer && account.is_signer));
+    }
 }

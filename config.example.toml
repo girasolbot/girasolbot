@@ -41,3 +41,20 @@ sell_percent = 50.0
 [[sl_levels]]
 trigger_percent = -20.0
 sell_percent = 100.0
+
+# ── Rug-pull protection / copy mode ──
+# reject_mint_authority = true
+# reject_freeze_authority = true
+# reject_mutable_metadata = true
+# reject_transfer_fee = true
+# max_transfer_fee_bps = 0
+# blacklist_path = "/path/to/blacklist.json" # default: unset
+# trailing_stop_bps = 0
+# rug_detector_enabled = false
+# rug_price_drop_bps = 5000
+# rug_liquidity_drop_bps = 8000
+# rug_window_secs = 90
+# Copy strategy: "mirror" keeps the legacy fixed buy amount; "replay" uses target amounts.
+# copy_mode = "mirror"
+# Replay sizing: "proportional" uses mirror_percent; "one_to_one" matches target SOL.
+# replay_size_mode = "proportional"

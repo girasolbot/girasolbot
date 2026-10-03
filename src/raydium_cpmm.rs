@@ -358,3 +358,17 @@ pub async fn build_sell_instructions(
 
     Ok(instructions)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::compute_swap_amount;
+
+    #[test]
+    fn compute_swap_amount_applies_slippage() {
+        let (amount_out, min_amount_out) =
+            compute_swap_amount(1_000_000_000, 2_000_000_000, true, 1_000_000, 500);
+
+        assert!(amount_out > 0);
+        assert_eq!(min_amount_out, amount_out * (10_000 - 500) / 10_000);
+    }
+}

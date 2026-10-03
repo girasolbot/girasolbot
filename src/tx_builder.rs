@@ -332,3 +332,29 @@ pub fn build_sell_instruction(
     warn!("Using fallback sell instruction builder (no IDL available)");
     Ok(Instruction { program_id: *program_id, accounts, data })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_sell_instruction_encodes_min_sol_output_little_endian() {
+        let program_id = Pubkey::new_unique();
+        let mint = Pubkey::new_unique().to_string();
+        let min_sol_output = 0x0102_0304_0506_0708_u64;
+
+        let instruction = build_sell_instruction(
+            &program_id,
+            &mint,
+            1,
+            min_sol_output,
+            &Pubkey::new_unique(),
+            &Pubkey::new_unique(),
+            Some(Pubkey::new_unique()),
+            &Settings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(&instruction.data[16..24], &min_sol_output.to_le_bytes());
+    }
+}

@@ -54,6 +54,8 @@ pub struct SellOrder {
 pub enum SellReason {
     TakeProfit { pnl_percent: f64 },
     StopLoss { pnl_percent: f64 },
+    TrailingStop { drop_percent: f64 },
+    RugDetected { drop_percent: f64 },
     MirrorSell,
 }
 
@@ -62,9 +64,43 @@ impl std::fmt::Display for SellReason {
         match self {
             SellReason::TakeProfit { pnl_percent } => write!(f, "TP ({:+.1}%)", pnl_percent),
             SellReason::StopLoss { pnl_percent } => write!(f, "SL ({:+.1}%)", pnl_percent),
+            SellReason::TrailingStop { drop_percent } => {
+                write!(f, "TRAILING STOP (-{:.1}%)", drop_percent.abs())
+            }
+            SellReason::RugDetected { drop_percent } => {
+                write!(f, "RUG DETECTED (-{:.1}%)", drop_percent.abs())
+            }
             SellReason::MirrorSell => write!(f, "MIRROR (target sold)"),
         }
     }
+}
+
+/// True when the trailing stop should fire: armed only once price rose above entry,
+/// and price has fallen `trailing_stop_bps` from the high-watermark.
+pub fn trailing_stop_triggered(
+    high_watermark: f64,
+    buy_price: f64,
+    current_price: f64,
+    trailing_stop_bps: u64,
+) -> bool {
+    if trailing_stop_bps == 0 || high_watermark <= buy_price || high_watermark <= 0.0 {
+        return false;
+    }
+    let trigger = high_watermark * (1.0 - trailing_stop_bps as f64 / 10_000.0);
+    current_price <= trigger
+}
+
+/// Percentage (basis points) drawn down from a reference price. 0 when no drawdown.
+pub fn drawdown_bps(reference_price: f64, current_price: f64) -> f64 {
+    if reference_price <= 0.0 || current_price >= reference_price {
+        return 0.0;
+    }
+    (reference_price - current_price) / reference_price * 10_000.0
+}
+
+/// True when the position is still inside the rug-observation window.
+pub fn within_rug_window(age_secs: i64, window_secs: u64) -> bool {
+    age_secs >= 0 && age_secs <= window_secs as i64
 }
 
 /// Monitors open positions and triggers TP/SL sells
@@ -173,7 +209,9 @@ impl PositionMonitor {
                         holding.triggered_sl_levels.push(level_index);
                     }
                 }
-                SellReason::MirrorSell => {
+                SellReason::TrailingStop { .. }
+                | SellReason::RugDetected { .. }
+                | SellReason::MirrorSell => {
                     // Full exit, no level tracking needed
                 }
             }
@@ -422,6 +460,110 @@ async fn monitor_loop(
                         continue;
                     }
                     let pnl_percent = (current_price - holding.buy_price) / holding.buy_price * 100.0;
+
+                    let high_watermark = holding.high_watermark.unwrap_or(current_price).max(current_price);
+                    {
+                        let mut positions = positions.write().await;
+                        if let Some(h) = positions.get_mut(mint) {
+                            h.high_watermark = Some(high_watermark);
+                        }
+                    }
+
+                    if trailing_stop_triggered(
+                        high_watermark,
+                        holding.buy_price,
+                        current_price,
+                        settings.trailing_stop_bps,
+                    ) {
+                        let drop_percent = -drawdown_bps(high_watermark, current_price) / 100.0;
+                        info!(
+                            "TRAILING STOP: {} | high-watermark {:.12} -> {:.12} SOL/token | selling all {} tokens",
+                            mint, high_watermark, current_price, holding.amount
+                        );
+                        let order = SellOrder {
+                            mint: mint.clone(),
+                            amount: holding.amount,
+                            current_price,
+                            decimals: holding.decimals,
+                            reason: SellReason::TrailingStop { drop_percent },
+                            level_index: 0,
+                            is_final: true,
+                            dex: holding.dex.clone(),
+                            amm_pool: holding.amm_pool.clone(),
+                            extra_pump_account: holding.extra_pump_account.clone(),
+                            pumpswap_accounts: holding.pumpswap_accounts.clone(),
+                        };
+                        if let Err(e) = sell_tx.send(order).await {
+                            error!("Failed to queue trailing-stop sell for {}: {}", mint, e);
+                        } else {
+                            set_pending_sell(&positions, mint).await;
+                        }
+                        continue;
+                    }
+
+                    if settings.rug_detector_enabled {
+                        let age_secs = chrono::Utc::now()
+                            .signed_duration_since(holding.buy_time)
+                            .num_seconds();
+                        if within_rug_window(age_secs, settings.rug_window_secs) {
+                            let reference_price = high_watermark.max(holding.buy_price);
+                            let price_drop = drawdown_bps(reference_price, current_price);
+                            let current_liquidity = crate::rpc::fetch_bonding_curve_state(
+                                mint,
+                                &rpc_client,
+                                &settings,
+                            )
+                            .await
+                            .ok()
+                            .map(|state| state.real_sol_reserves as f64 / 1e9);
+                            let entry_liquidity = match holding.entry_liquidity_sol {
+                                Some(value) => Some(value),
+                                None => {
+                                    if let Some(current) = current_liquidity {
+                                        let mut positions = positions.write().await;
+                                        if let Some(h) = positions.get_mut(mint) {
+                                            h.entry_liquidity_sol = Some(current);
+                                        }
+                                    }
+                                    current_liquidity
+                                }
+                            };
+                            let liquidity_drop = match (entry_liquidity, current_liquidity) {
+                                (Some(entry), Some(current)) => drawdown_bps(entry, current),
+                                _ => 0.0,
+                            };
+                            let price_rug = price_drop >= settings.rug_price_drop_bps as f64;
+                            let liquidity_rug = liquidity_drop
+                                >= settings.rug_liquidity_drop_bps as f64
+                                && entry_liquidity.unwrap_or(0.0) > 0.0;
+                            if price_rug || liquidity_rug {
+                                let drop_percent = -(price_drop.max(liquidity_drop)) / 100.0;
+                                warn!(
+                                    "RUG DETECTED: {} | price_drop={:.0}bps liq_drop={:.0}bps (age {}s) — emergency sell {} tokens",
+                                    mint, price_drop, liquidity_drop, age_secs, holding.amount
+                                );
+                                let order = SellOrder {
+                                    mint: mint.clone(),
+                                    amount: holding.amount,
+                                    current_price,
+                                    decimals: holding.decimals,
+                                    reason: SellReason::RugDetected { drop_percent },
+                                    level_index: 0,
+                                    is_final: true,
+                                    dex: holding.dex.clone(),
+                                    amm_pool: holding.amm_pool.clone(),
+                                    extra_pump_account: holding.extra_pump_account.clone(),
+                                    pumpswap_accounts: holding.pumpswap_accounts.clone(),
+                                };
+                                if let Err(e) = sell_tx.send(order).await {
+                                    error!("Failed to queue rug-detector sell for {}: {}", mint, e);
+                                } else {
+                                    set_pending_sell(&positions, mint).await;
+                                }
+                                continue;
+                            }
+                        }
+                    }
         
                     debug!(
                         "Position {}: price {:.12} -> {:.12} SOL/token | PnL: {:+.2}%",
@@ -740,6 +882,8 @@ mod tests {
             original_amount: amount,
             buy_price,
             buy_time: Utc::now(),
+            high_watermark: None,
+            entry_liquidity_sol: None,
             decimals: 6,
             buy_cost_sol: None,
             triggered_tp_levels: vec![],
@@ -783,6 +927,40 @@ mod tests {
         assert_eq!(format!("{}", tp), "TP (+35.5%)");
         let sl = SellReason::StopLoss { pnl_percent: -22.3 };
         assert_eq!(format!("{}", sl), "SL (-22.3%)");
+    }
+
+    #[test]
+    fn test_trailing_stop_disabled_or_below_entry() {
+        assert!(!trailing_stop_triggered(0.0, 1.0, 0.5, 5000));
+        assert!(!trailing_stop_triggered(1.0, 1.0, 0.4, 5000));
+        assert!(!trailing_stop_triggered(1.0, 1.0, 0.4, 0));
+    }
+
+    #[test]
+    fn test_trailing_stop_fires_after_run_up() {
+        assert!(trailing_stop_triggered(2.0, 1.0, 1.0, 3000));
+        assert!(!trailing_stop_triggered(2.0, 1.0, 1.5, 3000));
+    }
+
+    #[test]
+    fn test_drawdown_bps() {
+        assert_eq!(drawdown_bps(2.0, 1.0), 5000.0);
+        assert_eq!(drawdown_bps(1.0, 1.2), 0.0);
+    }
+
+    #[test]
+    fn test_within_rug_window() {
+        assert!(within_rug_window(30, 90));
+        assert!(!within_rug_window(91, 90));
+        assert!(!within_rug_window(-1, 90));
+    }
+
+    #[test]
+    fn test_sell_reason_display_new() {
+        let trailing = SellReason::TrailingStop { drop_percent: -12.5 };
+        assert!(format!("{}", trailing).contains("TRAILING"));
+        let rug = SellReason::RugDetected { drop_percent: -80.0 };
+        assert!(format!("{}", rug).contains("RUG"));
     }
 
     #[test]

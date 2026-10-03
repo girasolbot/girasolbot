@@ -549,6 +549,57 @@ async fn fetch_and_parse_transaction(
         }
     }
 
+    // Try PumpSwap (pump.fun AMM) if pump.fun bonding-curve didn't match
+    if found_buy.is_none() && found_sell.is_none() {
+        if let Some(amm_idx) = account_keys
+            .iter()
+            .position(|k| k == crate::pumpswap::PUMPSWAP_PROGRAM)
+        {
+            for instr in &all_instructions {
+                if let Some((is_buy, parsed)) =
+                    crate::pumpswap::parse_pumpswap_instruction(instr, amm_idx, &account_keys)
+                {
+                    if is_buy && found_buy.is_none() {
+                        let sol_amount = sol_delta
+                            .map(|(_, spent)| spent)
+                            .filter(|s| *s > 0.0)
+                            .or_else(|| {
+                                if parsed.sol_amount > 0 {
+                                    Some(parsed.sol_amount as f64 / 1e9)
+                                } else {
+                                    None
+                                }
+                            });
+                        found_buy = Some(ParsedBuy {
+                            mint: parsed.base_mint.clone(),
+                            sol_amount,
+                            token_amount: Some(parsed.token_amount),
+                            amm_pool: Some(parsed.pool.clone()),
+                            target_pump_accounts: if parsed.accounts.len() >= 17 {
+                                Some(parsed.accounts.clone())
+                            } else {
+                                None
+                            },
+                        });
+                    } else if !is_buy && found_sell.is_none() {
+                        let sol_received = sol_delta
+                            .map(|(recv, _)| recv)
+                            .filter(|r| *r > 0.0);
+                        found_sell = Some(ParsedSell {
+                            mint: parsed.base_mint.clone(),
+                            token_amount: Some(parsed.token_amount),
+                            sol_received,
+                            amm_pool: Some(parsed.pool.clone()),
+                        });
+                    }
+                    if found_buy.is_some() || found_sell.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // Try Raydium V4 / CPMM if pump.fun didn't match
     if found_buy.is_none() && found_sell.is_none() {
         let raydium_program = if account_keys.iter().any(|k| k == RAYDIUM_V4) {

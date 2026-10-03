@@ -195,7 +195,7 @@ pub fn compute_swap_amount(
         (pc_reserve as u128, coin_reserve as u128)
     };
 
-    let amount_out = if reserve_in + amount_in_after_fee as u128 > 0 {
+    let amount_out = if reserve_in > 0 {
         (reserve_out * amount_in_after_fee as u128 / (reserve_in + amount_in_after_fee as u128)) as u64
     } else {
         0
@@ -421,4 +421,25 @@ pub async fn build_sell_instructions(
     );
 
     Ok(instructions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_swap_amount;
+
+    #[test]
+    fn compute_swap_amount_applies_fee_and_slippage() {
+        let (amount_out, min_amount_out) =
+            compute_swap_amount(1_000_000_000, 2_000_000_000, true, 1_000_000, 500);
+
+        assert!(amount_out > 0);
+        assert_eq!(min_amount_out, amount_out * (10_000 - 500) / 10_000);
+    }
+
+    #[test]
+    fn compute_swap_amount_zero_reserve_is_zero() {
+        let (amount_out, _) = compute_swap_amount(0, 2_000_000_000, true, 1_000_000, 500);
+
+        assert_eq!(amount_out, 0);
+    }
 }

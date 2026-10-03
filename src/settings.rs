@@ -97,6 +97,45 @@ pub struct Settings {
     pub min_liquidity_sol: f64,
     #[serde(default = "default_max_liquidity_sol")]
     pub max_liquidity_sol: f64,
+    /// Reject buys when the mint still has a mint authority. Default: true.
+    #[serde(default = "default_reject_mint_authority")]
+    pub reject_mint_authority: bool,
+    /// Reject buys when the mint still has a freeze authority. Default: true.
+    #[serde(default = "default_reject_freeze_authority")]
+    pub reject_freeze_authority: bool,
+    /// Reject buys when Metaplex metadata `is_mutable == true`. If false, only warn.
+    #[serde(default = "default_reject_mutable_metadata")]
+    pub reject_mutable_metadata: bool,
+    /// Reject buys when a Token-2022 transfer fee exceeds `max_transfer_fee_bps`.
+    #[serde(default = "default_reject_transfer_fee")]
+    pub reject_transfer_fee: bool,
+    /// Maximum acceptable Token-2022 transfer fee in basis points. Default 0.
+    #[serde(default = "default_max_transfer_fee_bps")]
+    pub max_transfer_fee_bps: u64,
+    /// Path to a JSON blacklist file (array of base58 mint strings), hot-reloaded.
+    #[serde(default)]
+    pub blacklist_path: Option<String>,
+    /// Trailing-stop distance from the high-watermark, in basis points. 0 = disabled.
+    #[serde(default = "default_trailing_stop_bps")]
+    pub trailing_stop_bps: u64,
+    /// Enable the post-buy rug detector (liquidity/price collapse -> emergency sell).
+    #[serde(default = "default_rug_detector_enabled")]
+    pub rug_detector_enabled: bool,
+    /// Price drop (bps) from the position reference that flags a rug. Default 5000.
+    #[serde(default = "default_rug_price_drop_bps")]
+    pub rug_price_drop_bps: u64,
+    /// Liquidity drop (bps) from the position reference that flags a rug. Default 8000.
+    #[serde(default = "default_rug_liquidity_drop_bps")]
+    pub rug_liquidity_drop_bps: u64,
+    /// Observation window (seconds) for the rug detector. Default 90.
+    #[serde(default = "default_rug_window_secs")]
+    pub rug_window_secs: u64,
+    /// Copy-trade mode: "mirror" (existing) or "replay" (use target's real params).
+    #[serde(default = "default_copy_mode")]
+    pub copy_mode: String,
+    /// Replay sizing: "proportional" (scale target size) or "one_to_one" (same SOL).
+    #[serde(default = "default_replay_size_mode")]
+    pub replay_size_mode: String,
     // Helius Sender configuration
     #[serde(default)]
     pub helius_sender_enabled: bool,
@@ -558,6 +597,16 @@ impl Settings {
         if self.max_liquidity_sol < self.min_liquidity_sol {
             return Err(AppError::Validation("max_liquidity_sol must be >= min_liquidity_sol".to_string()));
         }
+        if self.copy_mode != "mirror" && self.copy_mode != "replay" {
+            return Err(AppError::Validation(
+                "copy_mode must be either 'mirror' or 'replay'".to_string(),
+            ));
+        }
+        if self.replay_size_mode != "proportional" && self.replay_size_mode != "one_to_one" {
+            return Err(AppError::Validation(
+                "replay_size_mode must be either 'proportional' or 'one_to_one'".to_string(),
+            ));
+        }
 
         Pubkey::from_str(&self.pump_fun_program)
             .map_err(|e| AppError::Validation(format!("invalid pump_fun_program: {}", e)))?;
@@ -776,6 +825,18 @@ fn default_slippage_bps() -> u64 { 500 }
 fn default_enable_safer_sniping() -> bool { false }
 fn default_min_liquidity_sol() -> f64 { 0.0 }
 fn default_max_liquidity_sol() -> f64 { 100.0 }
+fn default_reject_mint_authority() -> bool { true }
+fn default_reject_freeze_authority() -> bool { true }
+fn default_reject_mutable_metadata() -> bool { true }
+fn default_reject_transfer_fee() -> bool { true }
+fn default_max_transfer_fee_bps() -> u64 { 0 }
+fn default_trailing_stop_bps() -> u64 { 0 }
+fn default_rug_detector_enabled() -> bool { false }
+fn default_rug_price_drop_bps() -> u64 { 5_000 }
+fn default_rug_liquidity_drop_bps() -> u64 { 8_000 }
+fn default_rug_window_secs() -> u64 { 90 }
+fn default_copy_mode() -> String { "mirror".to_string() }
+fn default_replay_size_mode() -> String { "proportional".to_string() }
 fn default_helius_sender_endpoint() -> String { "https://sender.helius-rpc.com/fast".to_string() }
 fn default_helius_min_tip_sol() -> f64 { 0.001 }
 fn default_helius_priority_fee_multiplier() -> f64 { 1.2 }
@@ -1059,6 +1120,38 @@ mod tests {
     /// Helper: build a minimal Settings with all required fields for testing.
     fn default_test_settings() -> Settings {
         Settings::from_file("config.example.toml").expect("config.example.toml must load for tests")
+    }
+
+    #[test]
+    fn rug_protection_fields_use_documented_defaults() {
+        let s = default_test_settings();
+        assert!(s.reject_mint_authority);
+        assert!(s.reject_freeze_authority);
+        assert!(s.reject_mutable_metadata);
+        assert!(s.reject_transfer_fee);
+        assert_eq!(s.max_transfer_fee_bps, 0);
+        assert_eq!(s.blacklist_path, None);
+        assert_eq!(s.trailing_stop_bps, 0);
+        assert!(!s.rug_detector_enabled);
+        assert_eq!(s.rug_price_drop_bps, 5_000);
+        assert_eq!(s.rug_liquidity_drop_bps, 8_000);
+        assert_eq!(s.rug_window_secs, 90);
+        assert_eq!(s.copy_mode, "mirror");
+        assert_eq!(s.replay_size_mode, "proportional");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_copy_mode() {
+        let mut s = default_test_settings();
+        s.copy_mode = "unknown".to_string();
+        assert!(matches!(s.validate(), Err(AppError::Validation(message)) if message.contains("copy_mode")));
+    }
+
+    #[test]
+    fn validate_rejects_unknown_replay_size_mode() {
+        let mut s = default_test_settings();
+        s.replay_size_mode = "unknown".to_string();
+        assert!(matches!(s.validate(), Err(AppError::Validation(message)) if message.contains("replay_size_mode")));
     }
 
     #[test]

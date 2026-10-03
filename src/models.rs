@@ -57,6 +57,12 @@ pub struct Holding {
     pub original_amount: u64,
     pub buy_price: f64,
     pub buy_time: DateTime<Utc>,
+    /// Highest observed price (SOL/token) since entry — used by the trailing stop.
+    #[serde(default)]
+    pub high_watermark: Option<f64>,
+    /// Liquidity (SOL) observed shortly after entry — baseline for the rug detector.
+    #[serde(default)]
+    pub entry_liquidity_sol: Option<f64>,
     /// Token decimals (e.g. 6 for most pump.fun tokens). Used to convert base units to
     /// human-readable token amounts: `tokens = amount / 10^decimals`.
     #[serde(default = "default_token_decimals_u8")]

@@ -228,6 +228,89 @@ pub async fn detect_token_program_for_mint(
     Pubkey::from_str(TOKEN_2022_PROGRAM_ID).unwrap()
 }
 
+/// Fetch a mint account and build a TokenSafetyReport. `rpc_client`/`settings` are used
+/// for the raw getAccountInfo fetch (base64). Returns Err when the mint account is missing.
+pub async fn fetch_token_safety_report(
+    mint: &str,
+    rpc_client: &Arc<RpcClient>,
+    settings: &Arc<Settings>,
+) -> Result<crate::rug_guard::TokenSafetyReport, Box<dyn std::error::Error + Send + Sync>> {
+    let request = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+        "params": [mint, { "encoding": "base64", "commitment": "confirmed" }]
+    });
+    let response =
+        fetch_with_fallback::<Value>(request, "getAccountInfo", rpc_client, settings).await?;
+    let result = response.result.ok_or("mint account is missing")?;
+    let account = result.get("value").unwrap_or(&result);
+    if account.is_null() {
+        return Err("mint account is missing".into());
+    }
+
+    let encoded_data = account
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|data| data.first())
+        .and_then(Value::as_str)
+        .ok_or("mint account data is missing")?;
+    let data = Base64Engine.decode(encoded_data)?;
+    let (mint_authority, decimals, supply, freeze_authority) =
+        crate::rug_guard::parse_spl_mint(&data)?;
+    let is_token_2022 = account.get("owner").and_then(Value::as_str) == Some(TOKEN_2022_PROGRAM_ID);
+    let transfer_fee_bps = if is_token_2022 {
+        crate::rug_guard::parse_token2022_transfer_fee_bps(&data)
+    } else {
+        None
+    };
+
+    let mint_pubkey = Pubkey::from_str(mint)?;
+    let metadata_program = Pubkey::from_str("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")?;
+    let (metadata_pda, _) = Pubkey::find_program_address(
+        &[b"metadata", metadata_program.as_ref(), mint_pubkey.as_ref()],
+        &metadata_program,
+    );
+    let metadata_request = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+        "params": [metadata_pda.to_string(), { "encoding": "base64", "commitment": "confirmed" }]
+    });
+    let is_mutable = match fetch_with_fallback::<Value>(
+        metadata_request,
+        "getAccountInfo",
+        rpc_client,
+        settings,
+    )
+    .await
+    {
+        Ok(response) => response.result.and_then(|result| {
+            let account = result.get("value").unwrap_or(&result);
+            account
+                .get("data")
+                .and_then(Value::as_array)
+                .and_then(|data| data.first())
+                .and_then(Value::as_str)
+                .and_then(|encoded| Base64Engine.decode(encoded).ok())
+                .and_then(|data| crate::rug_guard::parse_metaplex_is_mutable(&data))
+        }),
+        Err(error) => {
+            debug!(
+                "Failed to fetch metadata for safety report {}: {}",
+                mint, error
+            );
+            None
+        }
+    };
+
+    Ok(crate::rug_guard::TokenSafetyReport {
+        mint_authority,
+        freeze_authority,
+        is_mutable,
+        transfer_fee_bps,
+        is_token_2022,
+        decimals,
+        supply,
+    })
+}
+
 /// Fetches transaction details and extracts pump.fun token creation information.
 /// 
 /// # Returns
@@ -1563,17 +1646,17 @@ pub async fn sell_token(
 
         // Build instruction data: disc(8) + amount(8) + min_sol_output(8) = 24 bytes
         let sell_discriminator: [u8; 8] = [0x33, 0xe6, 0x85, 0xa4, 0x01, 0x7f, 0x83, 0xad];
-        // Use 0 for min_sol_output to avoid slippage errors (6003) on volatile pump.fun tokens.
-        // We prioritize exiting the position over getting the exact expected SOL amount.
-        // The alternative (5-10% slippage) still fails when bonding curve moves fast.
-        let min_sol_with_slippage: u64 = 0;
-        let expected_sol = ((amount as f64 / token_divisor) * current_price * 1_000_000_000.0) as u64;
+        let expected_sol =
+            ((amount as f64 / token_divisor) * current_price * 1_000_000_000.0) as u64;
+        // Restore the configured slippage guard for PumpFun sells.
+        let min_sol_with_slippage: u64 =
+            (expected_sol as f64 * (1.0 - settings.slippage_bps as f64 / 10000.0)) as u64;
         let mut data = sell_discriminator.to_vec();
         data.extend(amount.to_le_bytes());
         data.extend(min_sol_with_slippage.to_le_bytes());
         
-        info!("Sell {}: {} accounts, {} bytes data, min_sol=0 (no slippage limit, expected ~{:.4} SOL), global={}, fee_config={}",
-            mint, sell_accounts.len(), data.len(), expected_sol as f64 / 1e9,
+        info!("Sell {}: {} accounts, {} bytes data, min_sol={:.4} SOL (expected ~{:.4} SOL), global={}, fee_config={}",
+            mint, sell_accounts.len(), data.len(), min_sol_with_slippage as f64 / 1e9, expected_sol as f64 / 1e9,
             global_pk, fee_config_pk);
 
         let instruction = solana_program::instruction::Instruction {
@@ -1798,8 +1881,11 @@ pub async fn sell_token(
                 };
         let sim_payer_pubkey = sim_payer_ref.pubkey();
         let program_id = Pubkey::from_str(&settings.pump_fun_program)?;
-        // Use 0 for min_sol_output to avoid slippage errors (6003) on pump.fun sells
-        let min_sol_with_slippage: u64 = 0;
+        let expected_sol =
+            ((amount as f64 / token_divisor) * current_price * 1_000_000_000.0) as u64;
+        // Restore the configured slippage guard for PumpFun sells.
+        let min_sol_with_slippage: u64 =
+            (expected_sol as f64 * (1.0 - settings.slippage_bps as f64 / 10000.0)) as u64;
         let instruction = build_sell_instruction(
             &program_id,
             mint,
@@ -1952,4 +2038,3 @@ pub async fn poll_signature_confirmation(
         tokio::time::sleep(poll_interval).await;
     }
 }
-
