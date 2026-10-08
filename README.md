@@ -7,7 +7,7 @@
 
 **Official links:** [Website](https://girasolbot.com) · [X](https://x.com/girasolbot) · [Support](https://t.me/girasolsupportbot) · [Security](SECURITY.md) · [Product status](docs/PRODUCT_STATUS.md)
 
-[![Token contract: coming soon](https://img.shields.io/badge/CA-coming%20soon-ffd85a?labelColor=03110b&style=for-the-badge&logo=solana)](#-girasol)
+[![Token contract: coming soon](https://img.shields.io/badge/CA-coming%20soon-ffd85a?labelColor=03110b&style=for-the-badge&logo=robinhood&logoColor=0b1a14)](#-girasol)
 
 Dependency advisories and explicitly deferred upstream migrations are tracked in [Security advisories](docs/SECURITY_ADVISORIES.md).
 
