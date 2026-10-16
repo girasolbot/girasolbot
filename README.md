@@ -33,7 +33,7 @@ Dependency advisories and explicitly deferred upstream migrations are tracked in
 > [!WARNING]
 > **No official Girasol token exists yet.** As of 27 September 2026, any mint, pool, presale or contract claiming affiliation with Girasol is fraudulent. The verified address will be published simultaneously on the official website, this repository and [@girasolbot](https://x.com/girasolbot) after deployment.
 
-![girasol hero](docs/hero.jpg)
+
 
 Girasol watches a wallet selected by the operator and can mirror supported swaps under explicit risk controls. It uses ShredStream/Geyser or WebSocket detection, pre-built transaction templates and concurrent provider submission to reduce end-to-end latency. Private keys stay in an encrypted local vault, and dry-run mode is enabled by default.
 
