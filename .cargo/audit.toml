@@ -5,5 +5,10 @@ ignore = [
   "RUSTSEC-2026-0098",
   "RUSTSEC-2026-0104",
   "RUSTSEC-2026-0099",
+  # rustls 0.21.x is pinned by the Solana SDK 2.x TLS graph; both advisories
+  # are resolved by the SDK 3 migration. Patch-bumped quinn-proto -> 0.11.19
+  # and rustls 0.23 -> 0.23.46 on 2026-10-16.
+  "RUSTSEC-2026-0346",
+  "RUSTSEC-2026-0349",
 ]
 informational_warnings = ["unmaintained", "unsound", "notice"]
