@@ -1,8 +1,4 @@
-# 🌻 Girasol
-
-<p align="center">
-  <img src="docs/logo.png" alt="Girasol" width="220" />
-</p>
+# <img src="docs/logo.png" alt="🌻" width="28" align="top" style="border-radius:50%"> Girasol
 
 > Wallet intelligence with optional controlled copy and strategy execution.
 
