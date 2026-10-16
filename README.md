@@ -1,5 +1,9 @@
 # 🌻 Girasol
 
+<p align="center">
+  <img src="docs/logo.png" alt="Girasol" width="220" />
+</p>
+
 > Wallet intelligence with optional controlled copy and strategy execution.
 
 [![CI](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml/badge.svg)](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml)
@@ -8,6 +12,21 @@
 **Official links:** [Website](https://girasolbot.com) · [X](https://x.com/girasolbot) · [Support](https://t.me/girasolsupportbot) · [Security](SECURITY.md) · [Product status](docs/PRODUCT_STATUS.md)
 
 [![Token contract: coming soon](https://img.shields.io/badge/CA-coming%20soon-ffd85a?labelColor=03110b&style=for-the-badge&logo=robinhood&logoColor=0b1a14)](#-girasol)
+
+## 🗓️ Roadmap — chain support
+
+| Chain | Status |
+|---|---|
+| Solana | ✅ live in this repository |
+| EVM (Robinhood Chain, 0x routing) | ✅ live in the TS bot |
+| **Elysium** | 🗓️ **October 20, 2026** — in-bot support ships on this date |
+| BNB Chain | 🕒 coming soon |
+| Arc | 🕒 coming soon |
+
+> Dates for chains marked "coming soon" are announced here and on
+> [@girasolbot](https://x.com/girasolbot) as soon as they are fixed. Elysium
+> support is on the release track; both remaining chains are already in
+> integration work.
 
 Dependency advisories and explicitly deferred upstream migrations are tracked in [Security advisories](docs/SECURITY_ADVISORIES.md).
 
