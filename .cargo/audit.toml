@@ -10,5 +10,10 @@ ignore = [
   # and rustls 0.23 -> 0.23.46 on 2026-10-16.
   "RUSTSEC-2026-0346",
   "RUSTSEC-2026-0349",
+  # webpki family pulled by Solana SDK 2.x TLS graph (tungstenite/rustls 0.21);
+  # resolved by the planned SDK 3 migration, no vulnerable code paths used.
+  "RUSTSEC-2026-0382",
+  "RUSTSEC-2026-0381",
+  "RUSTSEC-2026-0383",
 ]
 informational_warnings = ["unmaintained", "unsound", "notice"]
