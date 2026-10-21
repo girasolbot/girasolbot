@@ -2,7 +2,7 @@
 
 > Wallet intelligence with optional controlled copy and strategy execution.
 
-[![CI](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml/badge.svg)](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml)
+[![CI](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Official links:** [Website](https://girasolbot.com) · [X](https://x.com/girasolbot) · [Support](https://t.me/girasolsupportbot) · [Security](SECURITY.md) · [Product status](docs/PRODUCT_STATUS.md)
