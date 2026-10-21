@@ -7,7 +7,9 @@
 
 **Official links:** [Website](https://girasolbot.com) · [X](https://x.com/girasolbot) · [Support](https://t.me/girasolsupportbot) · [Security](SECURITY.md) · [Product status](docs/PRODUCT_STATUS.md)
 
-[![Token contract: coming soon](https://img.shields.io/badge/CA-coming%20soon-ffd85a?labelColor=03110b&style=for-the-badge&logo=robinhood&logoColor=0b1a14)](#-girasol)
+[![Token contract: live](https://img.shields.io/badge/CA-7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump-14F195?labelColor=03110b&style=for-the-badge&logo=solana&logoColor=0b1a14)](https://pump.fun/coin/7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump)
+
+**🌻 $GIRASOL is LIVE** — [**BUY GIRASOL**](https://pump.fun/coin/7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump) · Solana contract (click-to-copy on the website): `7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump`
 
 ## 🗓️ Roadmap — chain support
 
@@ -27,7 +29,7 @@
 Dependency advisories and explicitly deferred upstream migrations are tracked in [Security advisories](docs/SECURITY_ADVISORIES.md).
 
 > [!WARNING]
-> **No official Girasol token exists yet.** As of 27 September 2026, any mint, pool, presale or contract claiming affiliation with Girasol is fraudulent. The verified address will be published simultaneously on the official website, this repository and [@girasolbot](https://x.com/girasolbot) after deployment.
+> **The official Girasol token is LIVE on Solana.** The only verified contract is `7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump` — published simultaneously here, on [girasolbot.com/token](https://girasolbot.com/token/) and [@girasolbot](https://x.com/girasolbot). **[BUY GIRASOL](https://pump.fun/coin/7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump)**. Any other contract claiming affiliation with Girasol is fraudulent.
 
 
 
