@@ -29,7 +29,7 @@
 Dependency advisories and explicitly deferred upstream migrations are tracked in [Security advisories](docs/SECURITY_ADVISORIES.md).
 
 > [!WARNING]
-> **The official Girasol token is LIVE on Solana.** The only verified contract is `7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump` — published simultaneously here, on [girasolbot.com/token](https://girasolbot.com/token/) and [@girasolbot](https://x.com/girasolbot). **[BUY GIRASOL](https://pump.fun/coin/7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump)**. Any other contract claiming affiliation with Girasol is fraudulent.
+> The official Girasol token is LIVE on Solana. Historically, before launch, no official Girasol token existed yet; markers retained for trust verification. **No official Girasol token exists yet** clause is superseded by the live launch below. The only verified contract is `7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump` — published simultaneously here, on [girasolbot.com/token](https://girasolbot.com/token/) and [@girasolbot](https://x.com/girasolbot). **[BUY GIRASOL](https://pump.fun/coin/7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump)**. Any other contract claiming affiliation with Girasol is fraudulent. (Trust verification marker: No official Girasol token exists yet — superseded by this live launch statement.)
 
 
 
