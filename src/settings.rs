@@ -359,6 +359,37 @@ fn default_dev_fee_enabled() -> bool { true }
 fn default_use_onchain_idl() -> bool { true }
 
 impl Settings {
+    /// Reload only fields consumed dynamically. Providers, listeners and keys require restart.
+    pub fn with_reloaded_risk(&self, incoming: &Settings) -> Settings {
+        let mut next = self.clone();
+        next.buy_amount = incoming.buy_amount.clone();
+        next.mirror_percent = incoming.mirror_percent.clone();
+        next.allow_accumulate = incoming.allow_accumulate.clone();
+        next.mirror_sells = incoming.mirror_sells.clone();
+        next.max_holded_coins = incoming.max_holded_coins.clone();
+        next.slippage_bps = incoming.slippage_bps.clone();
+        next.tp_levels = incoming.tp_levels.clone();
+        next.sl_levels = incoming.sl_levels.clone();
+        next.reject_mint_authority = incoming.reject_mint_authority.clone();
+        next.reject_freeze_authority = incoming.reject_freeze_authority.clone();
+        next.reject_mutable_metadata = incoming.reject_mutable_metadata.clone();
+        next.reject_transfer_fee = incoming.reject_transfer_fee.clone();
+        next.max_transfer_fee_bps = incoming.max_transfer_fee_bps.clone();
+        next.min_tokens_threshold = incoming.min_tokens_threshold.clone();
+        next.max_sol_per_token = incoming.max_sol_per_token.clone();
+        next.enable_safer_sniping = incoming.enable_safer_sniping.clone();
+        next.min_liquidity_sol = incoming.min_liquidity_sol.clone();
+        next.max_liquidity_sol = incoming.max_liquidity_sol.clone();
+        next.trailing_stop_bps = incoming.trailing_stop_bps.clone();
+        next.rug_detector_enabled = incoming.rug_detector_enabled.clone();
+        next.rug_price_drop_bps = incoming.rug_price_drop_bps.clone();
+        next.rug_liquidity_drop_bps = incoming.rug_liquidity_drop_bps.clone();
+        next.rug_window_secs = incoming.rug_window_secs.clone();
+        next.copy_mode = incoming.copy_mode.clone();
+        next.replay_size_mode = incoming.replay_size_mode.clone();
+        next
+    }
+
     pub fn from_file(path: &str) -> Result<Self, AppError> {
         let builder = config::Config::builder()
             .add_source(config::File::with_name(path));
@@ -988,6 +1019,25 @@ mod tests {
         assert_eq!(s.sl_levels.len(), 1);
         assert_eq!(s.sl_levels[0].trigger_percent, -20.0);
         assert_eq!(s.cache_capacity, 1024);
+    }
+
+    #[test]
+    fn risk_reload_preserves_vault_transport_and_wallet() {
+        let mut current = Settings::from_file("config.example.toml").unwrap();
+        current.solana_rpc_urls = vec!["https://vault-provider.invalid/rpc".into()];
+        current.wallet_keypair_path = Some("startup-wallet".into());
+        let mut incoming = current.clone();
+        incoming.solana_rpc_urls = vec!["https://file-provider.invalid/rpc".into()];
+        incoming.wallet_keypair_path = Some("replacement-wallet".into());
+        incoming.listener_mode = "replacement".into();
+        incoming.buy_amount = current.buy_amount + 1.0;
+        incoming.tp_levels[0].trigger_percent += 10.0;
+        let next = current.with_reloaded_risk(&incoming);
+        assert_eq!(next.solana_rpc_urls, current.solana_rpc_urls);
+        assert_eq!(next.wallet_keypair_path, current.wallet_keypair_path);
+        assert_eq!(next.listener_mode, current.listener_mode);
+        assert_eq!(next.buy_amount, incoming.buy_amount);
+        assert_eq!(next.tp_levels, incoming.tp_levels);
     }
 
     // ── URL validation unit tests ──

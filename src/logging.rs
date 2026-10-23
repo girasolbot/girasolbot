@@ -1,4 +1,4 @@
-use log::{Log, Metadata, Record, Level, LevelFilter};
+use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,13 +26,19 @@ impl Log for DualLogger {
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
         let level = record.level();
         let module = record.module_path().unwrap_or("unknown");
-        let line = format!("{} [{:<5}] [{}] {}\n", now, level, module, record.args());
+        let line = redact_urls(&format!(
+            "{} [{:<5}] [{}] {}\n",
+            now,
+            level,
+            module,
+            record.args()
+        ));
 
         // Write to stdout (with color)
         let colored = match level {
             Level::Error => format!("\x1b[31m{}\x1b[0m", line), // red
-            Level::Warn  => format!("\x1b[33m{}\x1b[0m", line), // yellow
-            Level::Info  => line.clone(),
+            Level::Warn => format!("\x1b[33m{}\x1b[0m", line),  // yellow
+            Level::Info => line.clone(),
             Level::Debug => format!("\x1b[36m{}\x1b[0m", line), // cyan
             Level::Trace => format!("\x1b[90m{}\x1b[0m", line), // gray
         };
@@ -113,7 +119,48 @@ pub fn init() {
         level,
     };
 
-    log::set_boxed_logger(Box::new(logger))
-        .expect("Failed to set logger");
+    log::set_boxed_logger(Box::new(logger)).expect("Failed to set logger");
     log::set_max_level(level);
+}
+
+fn redact_urls(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = ["https://", "http://", "wss://", "ws://"]
+        .iter()
+        .filter_map(|scheme| rest.find(scheme))
+        .min()
+    {
+        out.push_str(&rest[..start]);
+        let suffix = &rest[start..];
+        let end = suffix
+            .find(|c: char| c.is_whitespace() || matches!(c, '\"' | '\'' | '<' | '>'))
+            .unwrap_or(suffix.len());
+        let safe = url::Url::parse(&suffix[..end])
+            .map(|u| u.origin().ascii_serialization())
+            .unwrap_or_else(|_| "[endpoint]".into());
+        out.push_str(&safe);
+        rest = &suffix[end..];
+    }
+    out.push_str(rest);
+    out
+}
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+    #[test]
+    fn urls_never_log_credentials_query_or_provider_path() {
+        let result = redact_urls(
+            "failed https://user:pass@example.com/private-path?api-key=secret wss://rpc.test/token",
+        );
+        assert!(!result.contains("pass"));
+        assert!(!result.contains("private-path"));
+        assert!(!result.contains("secret"));
+        assert!(result.contains("https://example.com"));
+        assert!(result.contains("wss://rpc.test"));
+    }
+    #[test]
+    fn ordinary_messages_stay_readable() {
+        assert_eq!(redact_urls("buy amount 0.1 SOL"), "buy amount 0.1 SOL");
+    }
 }

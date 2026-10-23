@@ -786,6 +786,7 @@ async fn send_rpc_transaction(
         ]
     });
 
+    crate::runtime::require_live_authorization()?;
     let response = shared_client()
         .post(endpoint)
         .json(&payload)
@@ -830,6 +831,7 @@ async fn send_bloxroute_http(
         ]
     });
 
+    crate::runtime::require_live_authorization()?;
     let response = shared_client()
         .post(endpoint)
         .header("Authorization", api_key)
@@ -871,6 +873,7 @@ async fn send_nextblock_http(
         }
     });
 
+    crate::runtime::require_live_authorization()?;
     let response = shared_client()
         .post(endpoint)
         .header("authorization", api_key)
@@ -955,4 +958,21 @@ mod tests {
             "loser should have been aborted via AbortHandle::abort() before incrementing the counter"
         );
     }
+    #[tokio::test]
+    async fn rpc_broadcast_refuses_before_connecting_without_authorization() {
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint=format!("http://{}",listener.local_addr().unwrap());
+        let attempt=send_rpc_transaction(&endpoint,"dGVzdA==");
+        tokio::pin!(attempt);
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            tokio::select! {
+                result=&mut attempt=>{
+                    let error=result.expect_err("uninstalled authorization must refuse broadcast");
+                    assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(),std::io::ErrorKind::PermissionDenied);
+                },
+                accepted=listener.accept()=>panic!("unauthorized broadcast reached listener: {:?}",accepted.unwrap().1),
+            }
+        }).await.expect("authorization check must finish promptly");
+    }
+
 }

@@ -432,7 +432,10 @@ pub async fn buy_token(
             // Wrap sync send_and_confirm in spawn_blocking to avoid blocking tokio runtime
             {
                 let client_clone = client.clone();
-                tokio::task::spawn_blocking(move || client_clone.send_and_confirm_transaction(&tx))
+                tokio::task::spawn_blocking(move || {
+                    crate::runtime::require_live_authorization()?;
+                    client_clone.send_and_confirm_transaction(&tx)
+                })
                     .await?
                     ?;
             }

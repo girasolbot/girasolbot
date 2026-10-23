@@ -11,7 +11,15 @@ use tokio::sync::Mutex;
 use crate::models::{Holding, PriceCache};
 use crate::settings::Settings;
 
-const POSITIONS_FILE: &str = "positions.json";
+fn positions_path(directory: &Path, live: bool) -> PathBuf {
+    directory.join(if live { "positions.json" } else { "positions.paper.json" })
+}
+#[cfg(test)]
+#[test]
+fn paper_does_not_overwrite_live_positions() {
+    assert_ne!(positions_path(Path::new("data"), false), positions_path(Path::new("data"), true));
+    assert_ne!(positions_path(Path::new("one"), true),positions_path(Path::new("two"), true));
+}
 
 /// Result of `try_acquire_buy` — atomic race-condition guard for concurrent buys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,11 +133,15 @@ impl PositionMonitor {
         rpc_client: Arc<RpcClient>,
         settings: Arc<ArcSwap<Settings>>,
         payer_pubkey: Option<solana_sdk::pubkey::Pubkey>,
-    ) -> Self {
-        let loaded = load_positions_from_file(POSITIONS_FILE);
+        live: bool,
+        data_dir: PathBuf,
+    ) -> std::io::Result<Self> {
+        std::fs::create_dir_all(&data_dir)?;
+        let positions_file = positions_path(&data_dir, live);
+        let loaded = load_positions_from_file(&positions_file.to_string_lossy())?;
         let total_loaded = loaded.len();
         if !loaded.is_empty() {
-            info!("Restored {} position(s) from {}", loaded.len(), POSITIONS_FILE);
+            info!("Restored {} position(s) from {}", loaded.len(), positions_file.display());
             for (mint, h) in &loaded {
                 info!(
                     "  Resumed: {} | {} tokens | buy price {:.12} SOL/token | TP triggered {:?} | SL triggered {:?}",
@@ -140,7 +152,7 @@ impl PositionMonitor {
 
         let positions: Arc<RwLock<HashMap<String, Holding>>> =
             Arc::new(RwLock::new(loaded));
-        let persist_path = PathBuf::from(POSITIONS_FILE);
+        let persist_path = positions_file;
         let monitor = PositionMonitor {
             positions: positions.clone(),
             pending_buys: Arc::new(Mutex::new(HashSet::new())),
@@ -162,7 +174,7 @@ impl PositionMonitor {
             monitor_loop(positions, sell_tx, price_cache, rpc_client, settings, payer_pubkey, persist_path).await;
         });
 
-        monitor
+        Ok(monitor)
     }
 
     /// Add a new position after a successful buy
@@ -242,11 +254,16 @@ impl PositionMonitor {
             if combined_amount > 0 {
                 holding.buy_price = (old_total + new_total) / combined_amount as f64;
             }
+            let prior_original_amount = holding.original_amount;
             holding.amount = combined_amount;
             holding.original_amount = combined_amount;
             // Accumulate cost
             if let Some(cost) = additional_cost {
-                holding.buy_cost_sol = Some(holding.buy_cost_sol.unwrap_or(0.0) + cost);
+                // Keep acquisition cost proportional to remaining inventory when accumulating after partial exits.
+                holding.buy_cost_sol = holding.buy_cost_sol.filter(|_|prior_original_amount>0)
+                    .map(|old|old * (combined_amount-additional_amount) as f64 / prior_original_amount as f64 + cost);
+            } else {
+                holding.buy_cost_sol = None;
             }
             // Note: do NOT clear triggered_tp_levels / triggered_sl_levels on accumulation.
             // The position size changed but already-triggered levels should remain marked
@@ -333,30 +350,15 @@ impl PositionMonitor {
     }
 }
 
-/// Load positions from a JSON file. Returns empty map on any error.
-fn load_positions_from_file(path: &str) -> HashMap<String, Holding> {
-    let path = Path::new(path);
-    if !path.exists() {
-        return HashMap::new();
-    }
-    match std::fs::read_to_string(path) {
-        Ok(content) => {
-            if content.trim().is_empty() {
-                return HashMap::new();
-            }
-            match serde_json::from_str::<HashMap<String, Holding>>(&content) {
-                Ok(map) => map,
-                Err(e) => {
-                    warn!("Failed to parse {}: {} — starting with empty positions", path.display(), e);
-                    HashMap::new()
-                }
-            }
-        }
-        Err(e) => {
-            warn!("Failed to read {}: {}", path.display(), e);
-            HashMap::new()
-        }
-    }
+/// Missing snapshots start empty; damaged or unreadable snapshots stop startup.
+fn load_positions_from_file(path: &str) -> std::io::Result<HashMap<String, Holding>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) => return Err(e),
+    };
+    serde_json::from_str(&content)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Invalid positions snapshot {path}: {e}")))
 }
 
 /// Atomically save positions to a JSON file (write to .tmp then rename).
@@ -905,6 +907,22 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn accumulation_after_partial_sell_uses_remaining_cost() {
+        let positions=Arc::new(RwLock::new(HashMap::new()));
+        let monitor=PositionMonitor { positions:positions.clone(), pending_buys:Arc::new(Mutex::new(HashSet::new())), persist_path:std::env::temp_dir().join(format!("girasol-basis-{}.json",rand::random::<u64>())) };
+        let mut holding=make_holding(50,0.01);
+        holding.original_amount=100;
+        holding.buy_cost_sol=Some(1.0);
+        positions.write().await.insert("mint".into(),holding);
+        monitor.accumulate_position("mint",50,0.02,Some(1.0)).await;
+        let snapshot=monitor.get_positions().await;
+        assert_eq!(snapshot["mint"].buy_cost_sol,Some(1.5));
+        assert_eq!(snapshot["mint"].original_amount,100);
+        monitor.accumulate_position("mint",10,0.02,None).await;
+        assert_eq!(monitor.get_positions().await["mint"].buy_cost_sol,None);
+    }
+
     #[test]
     fn test_pnl_calculation() {
         let buy_price: f64 = 0.000001;
@@ -973,7 +991,7 @@ mod tests {
         let path = tmp_dir.join("test_positions_roundtrip.json");
         save_positions_to_file(&positions, &path);
 
-        let loaded = load_positions_from_file(path.to_str().unwrap());
+        let loaded = load_positions_from_file(path.to_str().unwrap()).unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded["MintAAA111"].amount, 1_000_000);
         assert!((loaded["MintBBB222"].buy_price - 0.00005).abs() < 1e-15);
@@ -984,7 +1002,18 @@ mod tests {
 
     #[test]
     fn test_load_missing_file_returns_empty() {
-        let loaded = load_positions_from_file("/nonexistent/path/positions.json");
+        let loaded = load_positions_from_file("/nonexistent/path/positions.json").unwrap();
         assert!(loaded.is_empty());
     }
+    #[test]
+    fn corrupt_snapshots_are_rejected_without_modification() {
+        let path = std::env::temp_dir().join(format!("girasol-corrupt-{}", std::process::id()));
+        for bytes in ["", "{damaged"] {
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(load_positions_from_file(path.to_str().unwrap()).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
 }

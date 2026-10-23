@@ -323,8 +323,12 @@ impl BloxrouteQuicSender {
         let payload_bytes = tx_base64.as_bytes();
         let len_bytes = (payload_bytes.len() as u32).to_be_bytes();
 
+        crate::runtime::require_live_authorization()
+            .map_err(|error| QuicSendError::WriteFailed(error.to_string()))?;
         send_stream.write_all(&len_bytes).await
             .map_err(|e| QuicSendError::WriteFailed(e.to_string()))?;
+        crate::runtime::require_live_authorization()
+            .map_err(|error| QuicSendError::WriteFailed(error.to_string()))?;
         send_stream.write_all(payload_bytes).await
             .map_err(|e| QuicSendError::WriteFailed(e.to_string()))?;
         send_stream.finish()
@@ -445,8 +449,12 @@ impl NextBlockQuicSender {
         let payload_bytes = payload.as_bytes();
         let len_bytes = (payload_bytes.len() as u32).to_be_bytes();
 
+        crate::runtime::require_live_authorization()
+            .map_err(|error| QuicSendError::WriteFailed(error.to_string()))?;
         send_stream.write_all(&len_bytes).await
             .map_err(|e| QuicSendError::WriteFailed(e.to_string()))?;
+        crate::runtime::require_live_authorization()
+            .map_err(|error| QuicSendError::WriteFailed(error.to_string()))?;
         send_stream.write_all(payload_bytes).await
             .map_err(|e| QuicSendError::WriteFailed(e.to_string()))?;
         send_stream.finish()

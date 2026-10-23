@@ -39,6 +39,8 @@ use std::path::PathBuf;
 pub enum SlotNetwork {
     /// EVM copytrading bot (robinhood-bot-aws).
     Evm,
+    Robinhood,
+    Elysium,
     /// Solana bot (this repo).
     Solana,
     /// Shared by both bots — one slot, not duplicated per network.
@@ -49,6 +51,8 @@ impl SlotNetwork {
     pub fn as_str(&self) -> &'static str {
         match self {
             SlotNetwork::Evm => "evm",
+            SlotNetwork::Robinhood => "robinhood",
+            SlotNetwork::Elysium => "elysium",
             SlotNetwork::Solana => "solana",
             SlotNetwork::Both => "both",
         }
@@ -106,6 +110,22 @@ impl Pricing {
 /// are highlighted first in the panel and README. `helius` is a single
 /// shared slot (network "both") — do not duplicate it per network.
 pub const API_KEY_SLOTS: &[ApiKeySlot] = &[
+    ApiKeySlot { id: "solana-wallet", label: "Solana signing wallet", network: SlotNetwork::Solana, env_var: "SNIPER_WALLET_KEY", placeholder: "base58 or JSON array of 64 secret bytes", signup_url: "https://solana.com", pricing: Pricing::Free, purpose: "Signing key; imported locally, never returned by the panel" },
+    ApiKeySlot { id: "evm_robinhood_private_key", label: "Robinhood signing wallet", network: SlotNetwork::Robinhood, env_var: "ROBINHOOD_PRIVATE_KEY", placeholder: "0x-prefixed 32-byte private key", signup_url: "https://robinhood.com", pricing: Pricing::Free, purpose: "Robinhood transaction signing" },
+    ApiKeySlot { id: "evm_elysium_private_key", label: "Elysium signing wallet", network: SlotNetwork::Elysium, env_var: "ELYSIUM_PRIVATE_KEY", placeholder: "0x-prefixed 32-byte private key", signup_url: "https://kinetiq.xyz", pricing: Pricing::Free, purpose: "Elysium transaction signing" },
+    ApiKeySlot { id: "solana-tip-rpc", label: "Solana tip RPC", network: SlotNetwork::Solana, env_var: "SOLANA_TIP_RPC_URL", placeholder: "https://your-tip-rpc", signup_url: "https://jito.wtf", pricing: Pricing::Tips, purpose: "Optional dedicated transaction submission endpoint" },
+    ApiKeySlot { id: "robinhood-rpc", label: "Robinhood RPC", network: SlotNetwork::Robinhood, env_var: "ROBINHOOD_RPC_URL", placeholder: "https://your-rpc", signup_url: "https://robinhood.com", pricing: Pricing::Free, purpose: "Robinhood JSON-RPC reads and simulation" },
+    ApiKeySlot { id: "robinhood-tip-rpc", label: "Robinhood tip RPC", network: SlotNetwork::Robinhood, env_var: "ROBINHOOD_TIP_RPC_URL", placeholder: "https://your-tip-rpc", signup_url: "https://robinhood.com", pricing: Pricing::Tips, purpose: "Optional dedicated transaction submission endpoint" },
+    ApiKeySlot { id: "elysium-rpc", label: "Elysium RPC", network: SlotNetwork::Elysium, env_var: "ELYSIUM_RPC_URL", placeholder: "https://your-rpc", signup_url: "https://kinetiq.xyz", pricing: Pricing::Free, purpose: "Elysium JSON-RPC reads and simulation" },
+    ApiKeySlot { id: "elysium-tip-rpc", label: "Elysium tip RPC", network: SlotNetwork::Elysium, env_var: "ELYSIUM_TIP_RPC_URL", placeholder: "https://your-tip-rpc", signup_url: "https://kinetiq.xyz", pricing: Pricing::Tips, purpose: "Optional dedicated transaction submission endpoint" },
+    ApiKeySlot { id: "llm-openai", label: "OpenAI", network: SlotNetwork::Both, env_var: "OPENAI_API_KEY", placeholder: "sk-...", signup_url: "https://platform.openai.com/api-keys", pricing: Pricing::Subscription, purpose: "Optional AI provider API key" },
+    ApiKeySlot { id: "llm-anthropic", label: "Anthropic", network: SlotNetwork::Both, env_var: "ANTHROPIC_API_KEY", placeholder: "sk-ant-...", signup_url: "https://console.anthropic.com", pricing: Pricing::Subscription, purpose: "Optional AI provider API key" },
+    ApiKeySlot { id: "llm-deepseek", label: "DeepSeek", network: SlotNetwork::Both, env_var: "DEEPSEEK_API_KEY", placeholder: "sk-...", signup_url: "https://platform.deepseek.com", pricing: Pricing::Subscription, purpose: "Optional AI provider API key; no verified free V4 endpoint" },
+    ApiKeySlot { id: "llm-glm", label: "GLM / Zhipu", network: SlotNetwork::Both, env_var: "GLM_API_KEY", placeholder: "API key", signup_url: "https://open.bigmodel.cn", pricing: Pricing::Subscription, purpose: "Optional AI provider API key" },
+    ApiKeySlot { id: "llm-qwen", label: "Qwen / DashScope", network: SlotNetwork::Both, env_var: "QWEN_API_KEY", placeholder: "sk-...", signup_url: "https://dashscope.console.aliyun.com", pricing: Pricing::Subscription, purpose: "Optional AI provider API key" },
+    ApiKeySlot { id: "telegram-bot-token", label: "Telegram bot token", network: SlotNetwork::Both, env_var: "TELEGRAM_BOT_TOKEN", placeholder: "123456:...", signup_url: "https://t.me/BotFather", pricing: Pricing::Free, purpose: "Dedicated assistant bot; token from BotFather" },
+    ApiKeySlot { id: "telegram-chat-id", label: "Telegram authorized chat", network: SlotNetwork::Both, env_var: "TELEGRAM_CHAT_ID", placeholder: "Numeric chat ID", signup_url: "https://core.telegram.org/bots/api", pricing: Pricing::Free, purpose: "Only this chat may control the Telegram assistant" },
+
     // --- Solana (this bot) slots ---
     ApiKeySlot {
         id: "rpc-http",
@@ -497,39 +517,35 @@ impl ApiKeyVault {
     /// format, re-encrypting every legacy slot under the v2 scrypt KDF. The
     /// returned value is always a v2 file (not yet written to disk — callers
     /// persist it as part of their set/delete save).
-    fn load_or_migrate(&self, secret: &str) -> VaultFileV2 {
-        match self.load() {
-            VaultFileAny::V2(v) => v,
+    fn load_or_migrate(&self, secret: &str) -> Result<VaultFileV2, String> {
+        let loaded = match std::fs::read_to_string(self.vault_path()) {
+            Ok(text) => Self::parse(&text)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::empty_v2()),
+            Err(e) => return Err(format!("cannot read existing vault: {}", e)),
+        };
+        match loaded {
+            VaultFileAny::V2(v) => {
+                // Refuse changes with the wrong passphrase or a damaged slot.
+                for blob in v.slots.values() { Self::decrypt_v2(secret, blob, &v.salt)?; }
+                Ok(v)
+            }
             VaultFileAny::V1Rust(v1) => {
                 let mut migrated = Self::empty_v2();
                 for (slot, blob) in &v1.data {
-                    let salt_hex = match v1.salts.get(slot) {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    if let Ok(salt) = hex::decode(salt_hex) {
-                        // Rust v1 KDF: SHA256("girasol-vault-v1"+secret+salt)
-                        // stretched by 4096 rounds of SHA256(prev || i_le).
-                        if let Some(plain) = Self::decrypt_legacy_sha256(secret, blob, &salt) {
-                            if let Ok(blob_v2) = Self::encrypt_v2(secret, &plain, &migrated.salt) {
-                                migrated.slots.insert(slot.clone(), blob_v2);
-                            }
-                        }
-                    }
+                    let salt_hex = v1.salts.get(slot).ok_or("legacy vault slot has no salt")?;
+                    let salt = hex::decode(salt_hex).map_err(|_| "malformed legacy vault salt")?;
+                    let plain = Self::decrypt_legacy_sha256(secret, blob, &salt).ok_or("legacy vault decryption failed; refusing migration")?;
+                    migrated.slots.insert(slot.clone(), Self::encrypt_v2(secret, &plain, &migrated.salt)?);
                 }
-                migrated
+                Ok(migrated)
             }
             VaultFileAny::V1Ts(v1) => {
-                // TS v1 layout: single file salt, plain scrypt KDF.
                 let mut migrated = Self::empty_v2();
                 for (slot, blob) in &v1.data {
-                    if let Some(plain) = Self::decrypt_legacy_scrypt(secret, blob, &v1.salt) {
-                        if let Ok(blob_v2) = Self::encrypt_v2(secret, &plain, &migrated.salt) {
-                            migrated.slots.insert(slot.clone(), blob_v2);
-                        }
-                    }
+                    let plain = Self::decrypt_legacy_scrypt(secret, blob, &v1.salt).ok_or("legacy vault decryption failed; refusing migration")?;
+                    migrated.slots.insert(slot.clone(), Self::encrypt_v2(secret, &plain, &migrated.salt)?);
                 }
-                migrated
+                Ok(migrated)
             }
         }
     }
@@ -591,12 +607,14 @@ impl ApiKeyVault {
 
     /// v2-decrypt a structured {iv, ct, tag} entry under the file salt.
     fn decrypt_v2(secret: &str, blob: &SlotBlobV2, salt_hex: &str) -> Result<String, String> {
+        let iv = hex::decode(&blob.iv).map_err(|_| "malformed iv".to_string())?;
+        if iv.len() != 12 { return Err("malformed iv length".to_string()); }
+        let tag = hex::decode(&blob.tag).map_err(|_| "malformed tag".to_string())?;
+        if tag.len() != 16 { return Err("malformed tag length".to_string()); }
+        let ct = hex::decode(&blob.ct).map_err(|_| "malformed ciphertext".to_string())?;
         let key_bytes = Self::derive_key_v2(secret, salt_hex)?;
         let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
         let cipher = Aes256Gcm::new(key);
-        let iv = hex::decode(&blob.iv).map_err(|_| "malformed iv".to_string())?;
-        let tag = hex::decode(&blob.tag).map_err(|_| "malformed tag".to_string())?;
-        let ct = hex::decode(&blob.ct).map_err(|_| "malformed ciphertext".to_string())?;
         let mut full = ct;
         full.extend_from_slice(&tag);
         let nonce = Nonce::from_slice(&iv);
@@ -636,6 +654,7 @@ impl ApiKeyVault {
         let iv = hex::decode(parts[0]).ok()?;
         let tag = hex::decode(parts[1]).ok()?;
         let ct = hex::decode(parts[2]).ok()?;
+        if iv.len() != 12 || tag.len() != 16 { return None; }
         let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
         let cipher = Aes256Gcm::new(key);
         let mut full = ct;
@@ -687,7 +706,7 @@ impl ApiKeyVault {
         }
         let _guard = self.io_lock.lock().await;
         let secret = self.load_secret()?;
-        let mut v = self.load_or_migrate(&secret);
+        let mut v = self.load_or_migrate(&secret)?;
         if value.trim().is_empty() {
             v.slots.remove(slot_id);
         } else {
@@ -697,18 +716,17 @@ impl ApiKeyVault {
         self.save(&v)
     }
 
+    /// Read only encrypted local storage, without environment fallback.
+    pub async fn get_vault_key(&self, slot_id: &str) -> Option<String> {
+        let _guard = self.io_lock.lock().await;
+        let secret = self.load_secret().ok()?;
+        Self::read_slot(&self.load(), &secret, slot_id)
+    }
+
     /// Read the effective key for a slot: vault wins, then env var fallback.
-    /// This is the ONLY key-reading entry point — never log its result.
+    /// Never log its result. Signing must use get_vault_key instead.
     pub async fn get_api_key(&self, slot_id: &str) -> Option<String> {
-        {
-            let _guard = self.io_lock.lock().await;
-            if let Ok(secret) = self.load_secret() {
-                let any = self.load();
-                if let Some(plain) = Self::read_slot(&any, &secret, slot_id) {
-                    return Some(plain);
-                }
-            }
-        }
+        if let Some(value) = self.get_vault_key(slot_id).await { return Some(value); }
         let slot = find_slot(slot_id)?;
         std::env::var(slot.env_var).ok().filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string())
     }
@@ -805,7 +823,7 @@ fn file_permissions_tight(_path: &std::path::Path) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn temp_vault(tag: &str) -> (ApiKeyVault, PathBuf) {
@@ -817,7 +835,7 @@ mod tests {
     /// Serialize tests that mutate VAULT_PASSPHRASE — parallel tokio::test
     /// threads share the process environment, and without this the rotation
     /// test races every other vault test.
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test]
     async fn test_set_get_mask_roundtrip() {
@@ -836,6 +854,68 @@ mod tests {
         let masked = helius.masked.clone().unwrap();
         assert!(!masked.contains("abcdef1234567890xyz"));
         assert!(masked.contains("…"));
+    }
+
+    #[tokio::test]
+    async fn vault_only_lookup_ignores_environment() {
+        let _env = ENV_LOCK.lock().await;
+        let name = "ELYSIUM_PRIVATE_KEY";
+        let original = std::env::var_os(name);
+        std::env::set_var(name, "env-secret-must-not-sign");
+        let (vault, _dir) = temp_vault("vault-only");
+        let env_value = vault.get_api_key("evm_elysium_private_key").await;
+        let vault_value = vault.get_vault_key("evm_elysium_private_key").await;
+        if let Some(value) = original { std::env::set_var(name, value); } else { std::env::remove_var(name); }
+        assert_eq!(env_value.as_deref(), Some("env-secret-must-not-sign"));
+        assert!(vault_value.is_none(), "encrypted-only lookup must ignore environment");
+        vault.set_api_key("evm_elysium_private_key", "encrypted-test-secret").await.unwrap();
+        assert_eq!(vault.get_vault_key("evm_elysium_private_key").await.as_deref(), Some("encrypted-test-secret"));
+    }
+
+    #[tokio::test]
+    async fn corrupt_vault_write_preserves_bytes() {
+        let _env = ENV_LOCK.lock().await;
+        let (vault, dir) = temp_vault("corrupt");
+        std::fs::create_dir_all(&dir).unwrap();
+        for original in ["{broken", "{\"version\":999}", r#"{"version":1,"salts":{},"data":{"jito":"bad"}}"#, r#"{"version":1,"salt":"00","data":{"jito":"00:00:00"}}"#] {
+            std::fs::write(vault.vault_path(), original).unwrap();
+            assert!(vault.set_api_key("jito", "new-value").await.is_err(), "corrupt vault must be rejected");
+            assert_eq!(std::fs::read_to_string(vault.vault_path()).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn malformed_v2_lengths_return_errors_without_panicking() {
+        let salt = hex::encode([0u8; 32]);
+        for length in [0, 1, 11, 13] {
+            let blob = SlotBlobV2 { iv: hex::encode(vec![0u8; length]), ct: "00".into(), tag: hex::encode([0u8; 16]) };
+            assert_eq!(ApiKeyVault::decrypt_v2("test", &blob, &salt).unwrap_err(), "malformed iv length");
+        }
+        for length in [0, 1, 15, 17] {
+            let blob = SlotBlobV2 { iv: hex::encode([0u8; 12]), ct: "00".into(), tag: hex::encode(vec![0u8; length]) };
+            assert_eq!(ApiKeyVault::decrypt_v2("test", &blob, &salt).unwrap_err(), "malformed tag length");
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_v2_file_is_preserved_on_write() {
+        let _env = ENV_LOCK.lock().await;
+        let (vault, dir) = temp_vault("v2-invalid-iv");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (iv, tag) in [("00".into(), hex::encode([0u8; 16])), (hex::encode([0u8; 12]), "00".into())] {
+            let mut file = ApiKeyVault::empty_v2();
+            file.slots.insert("jito".into(), SlotBlobV2 { iv, ct: "00".into(), tag });
+            let original = serde_json::to_vec(&file).unwrap();
+            std::fs::write(vault.vault_path(), &original).unwrap();
+            assert!(vault.get_vault_key("jito").await.is_none());
+            assert!(vault.set_api_key("jito", "new-secret").await.is_err());
+            assert_eq!(std::fs::read(vault.vault_path()).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn malformed_legacy_nonce_does_not_panic() {
+        assert!(ApiKeyVault::decrypt_v1_blob([0u8;32], "00:00000000000000000000000000000000:00").is_none());
     }
 
     #[tokio::test]
@@ -896,6 +976,29 @@ mod tests {
         assert!(m.starts_with("sk"));
         assert!(m.ends_with("1234"));
         assert!(m.contains('…'));
+    }
+
+    #[test]
+    fn multichain_and_assistant_slots_exist() {
+        for id in [
+            "solana-wallet",
+            "evm_robinhood_private_key",
+            "evm_elysium_private_key",
+            "solana-tip-rpc",
+            "robinhood-rpc",
+            "robinhood-tip-rpc",
+            "elysium-rpc",
+            "elysium-tip-rpc",
+            "llm-openai",
+            "llm-anthropic",
+            "llm-deepseek",
+            "llm-glm",
+            "llm-qwen",
+            "telegram-bot-token",
+            "telegram-chat-id",
+        ] {
+            assert!(find_slot(id).is_some(), "missing {}", id);
+        }
     }
 
     #[test]

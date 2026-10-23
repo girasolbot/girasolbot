@@ -1,3 +1,7 @@
+mod intelligence;
+mod telegram;
+mod evm;
+mod runtime;
 mod blockhash_cache;
 mod api_key_vault;
 mod key_panel;
@@ -228,11 +232,72 @@ fn load_simulate_keypair(settings: &Settings) -> Option<Keypair> {
 async fn main() -> Result<()> {
     logging::init();
     info!("=== SAME BLOCK SNIPER v{} ===", env!("CARGO_PKG_VERSION"));
+    let cli_real = std::env::args().any(|a| a == "--real");
+    let runtime = Arc::new(runtime::RuntimeState::new(cli_real));
+    runtime::install_authorization(runtime.clone())?;
+    let data_dir = std::env::var("SNIPER_DATA_DIR").map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let vault = Arc::new(api_key_vault::ApiKeyVault::new(data_dir.clone()));
+    let panel_bind = std::env::var("SNIPER_PANEL_BIND").unwrap_or_else(|_| "127.0.0.1:8078".to_string());
+    let panel_runtime = runtime.clone();
+    let panel_dir = data_dir.clone();
+    let panel_vault = vault.clone();
+    tokio::spawn(async move {
+        if let Err(e) = key_panel::start_panel(&panel_bind, panel_dir, panel_runtime, panel_vault).await {
+            error!("Required panel failed: {}", e);
+            std::process::exit(1);
+        }
+    });
+    intelligence::start_daily_refresh(vault.clone(), data_dir.clone());
+    let status_runtime = runtime.clone();
+    telegram::spawn(vault.clone(), data_dir.clone(), Arc::new(move ||status_runtime.status()));
+    let args: Vec<String> = std::env::args().collect();
+    let panel_only=args.iter().any(|a|a=="--panel-only");
+    if let Some(index) = args.iter().position(|a|a=="--evm-config").filter(|_|!panel_only) {
+        let path = args.get(index+1).ok_or_else(||anyhow::anyhow!("--evm-config requires a file"))?;
+        let config = evm::EvmConfig::load_with_vault(path, &vault).await?;
+        let (events,mut received) = mpsc::channel(256);
+        let evm_runtime = runtime.clone();
+        let event_runtime = runtime.clone();
+        let evm_vault = vault.clone();
+        tokio::spawn(async move {
+            if let Err(e) = evm::run(config,events,Arc::new(move ||evm_runtime.live_enabled()),evm_vault).await {
+                error!("EVM engine stopped: {}",e);
+            }
+        });
+        tokio::spawn(async move {
+            while let Some(event) = received.recv().await {
+                match serde_json::to_value(event) {
+                    Ok(value) => { if let Err(e) = event_runtime.record_trade(value) {error!("EVM journal: {}",e);} },
+                    Err(e) => error!("EVM event serialization: {}",e),
+                }
+            }
+        });
+    }
     // Load config
     let config_path = std::env::var("SNIPER_CONFIG")
         .unwrap_or_else(|_| "config.toml".to_string());
-    let settings = Settings::from_file(&config_path)
+    if panel_only || !std::path::Path::new(&config_path).exists() {
+        info!("Dashboard ready; no Solana engine started. Configure config.toml and restart to follow a target.");
+        tokio::signal::ctrl_c().await?;
+        return Ok(());
+    }
+    let mut settings = Settings::from_file(&config_path)
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+    if let Some(url) = vault.get_api_key("rpc-http").await { settings.solana_rpc_urls = vec![url]; }
+    if let Some(url) = vault.get_api_key("rpc-wss").await { settings.solana_ws_urls = vec![url]; }
+    if let Some(url) = vault.get_api_key("jito").await { settings.swqos_jito_url = url; }
+    if let Some(url) = vault.get_api_key("solana-tip-rpc").await {
+        settings.swqos_jito_url = url;
+        settings.swqos_concurrent_send = true;
+        if !settings.swqos_providers.iter().any(|p|p=="jito") { settings.swqos_providers.push("jito".into()); }
+    }
+    if let Some(key) = vault.get_api_key("bloxroute").await { settings.bloxroute_api_key = Some(key); }
+    if let Some(key) = vault.get_api_key("nextblock").await { settings.nextblock_api_key = Some(key); }
+    if cli_real && (settings.wallet_private_key_string.is_some() || settings.wallet_keypair_json.is_some() || settings.wallet_keypair_path.is_some()) {
+        anyhow::bail!("Import the wallet into the encrypted solana-wallet vault slot, then remove plaintext wallet keys from config before live mode");
+    }
+    if let Some(key) = vault.get_vault_key("solana-wallet").await { settings.wallet_private_key_string = Some(key); }
     settings.validate()
         .map_err(|e| anyhow::anyhow!("Config validation failed: {}", e))?;
     info!("Config loaded and validated from {}", config_path);
@@ -246,9 +311,22 @@ async fn main() -> Result<()> {
     let target_wallet = Arc::new(target_wallet);
     info!("Target wallet: {}", target_wallet);
 
-    // Determine mode: config dry_run=false OR --real CLI flag → real mode
-    let cli_real = std::env::args().any(|a| a == "--real");
-    let is_real = !settings.dry_run || cli_real;
+    // Live requires both CLI intent and a fresh authenticated panel confirmation.
+    let is_real = cli_real;
+    if !settings.dry_run && !cli_real { warn!("Ignoring dry_run=false: live requires --real and panel confirmation"); }
+    if cli_real && std::path::Path::new("positions.json").exists() && !data_dir.join("positions.json").exists() {
+        anyhow::bail!("Move legacy positions.json into SNIPER_DATA_DIR before live startup; existing live holdings must not be ignored");
+    }
+    if cli_real {
+        info!("Live requested; waiting for authenticated panel confirmation before starting execution.");
+        loop {
+            if runtime.live_enabled() { break; }
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => { result?; return Ok(()); },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+            }
+        }
+    }
     if is_real {
         warn!("REAL MODE ACTIVE - transactions will be submitted to the network");
         if cli_real && settings.dry_run {
@@ -288,21 +366,6 @@ async fn main() -> Result<()> {
         info!("Wallet loaded: {}", kp.pubkey());
     } else {
         info!("No wallet keypair loaded (dry-run will use ephemeral keypair)");
-    }
-
-    // API-key management panel (encrypted vault + web UI). Disabled unless
-    // PANEL_AUTH_TOKEN (min 8 chars) is set; binds to SNIPER_PANEL_BIND
-    // (default 127.0.0.1:8078, loopback only).
-    {
-        let panel_bind = std::env::var("SNIPER_PANEL_BIND")
-            .unwrap_or_else(|_| "127.0.0.1:8078".to_string());
-        let data_dir = std::env::var("SNIPER_DATA_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("data"));
-        let panel_result = key_panel::start_panel(&panel_bind, data_dir).await;
-        if let Err(e) = panel_result {
-            warn!("Key panel disabled: {}", e);
-        }
     }
 
     // Create RPC client
@@ -449,8 +512,10 @@ async fn main() -> Result<()> {
         price_cache.clone(),
         rpc_client.clone(),
         shared_settings.clone(),
-        buy_keypair.as_ref().as_ref().map(|k| k.pubkey()),
-    );
+        if is_real {buy_keypair.as_ref().as_ref().map(|k|k.pubkey())} else {None},
+        is_real,
+        data_dir.clone(),
+    )?;
     info!("Position monitor started (5s interval)");
 
     // Spawn listener based on configured mode
@@ -591,6 +656,21 @@ async fn main() -> Result<()> {
         }
     });
 
+    let snapshot_monitor = position_monitor.clone();
+    let snapshot_dir = data_dir.clone();
+    tokio::spawn(async move {
+        loop {
+            let positions = snapshot_monitor.get_positions().await;
+            if let Ok(bytes) = serde_json::to_vec(&positions) {
+                if tokio::fs::create_dir_all(&snapshot_dir).await.is_ok() {
+                    let temporary = snapshot_dir.join("panel-positions.json.tmp");
+                    if tokio::fs::write(&temporary,bytes).await.is_ok() { let _=tokio::fs::rename(temporary,snapshot_dir.join("panel-positions.json")).await; }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
+
     // Spawn Sell Executor (uses ArcSwap for hot-reload of sell-related settings)
     let sell_rpc = rpc_client.clone();
     let sell_shared_settings = shared_settings.clone();
@@ -599,6 +679,7 @@ async fn main() -> Result<()> {
     let sell_cached_fee = cached_fee_recipients.clone();
     let sell_swqos = swqos_sender.clone();
     let sell_leader_cache = leader_cache.clone();
+    let sell_runtime = runtime.clone();
     let sell_handle = tokio::spawn(async move {
         run_sell_executor(
             &mut sell_rx,
@@ -612,6 +693,7 @@ async fn main() -> Result<()> {
             sell_cached_fee.as_ref().map(|arc| arc.as_ref()),
             sell_swqos.as_ref(),
             &sell_leader_cache,
+            &sell_runtime,
         ).await;
     });
 
@@ -691,10 +773,12 @@ async fn main() -> Result<()> {
                 let buy_keypair = buy_keypair.clone();
                 let buy_simulate_keypair = buy_simulate_keypair.clone();
                 let blacklist = blacklist.clone();
+                let runtime = runtime.clone();
                 tokio::spawn(async move {
                 // Load latest settings (hot-reloadable)
                 if let Err(e) = async {
                 let current_settings = shared_settings.load_full();
+                if is_real && !runtime.live_enabled() { warn!("Live buy paused: panel authorization revoked"); return Ok::<(), anyhow::Error>(()); }
 
                 let mint = detected.mint.clone();
 
@@ -932,6 +1016,7 @@ async fn main() -> Result<()> {
                                         "method": "sendTransaction",
                                         "params": [tx_base64, {"encoding": "base64", "skipPreflight": true, "maxRetries": 0}]
                                     });
+                                    runtime::require_live_authorization()?;
                                     let resp = crate::rpc::SHARED_HTTP_CLIENT
                                         .post(&current_settings.helius_sender_endpoint)
                                         .json(&body).send().await?;
@@ -1076,6 +1161,7 @@ async fn main() -> Result<()> {
                                         "method": "sendTransaction",
                                         "params": [tx_base64, {"encoding": "base64", "skipPreflight": true, "maxRetries": 0}]
                                     });
+                                    runtime::require_live_authorization()?;
                                     let resp = crate::rpc::SHARED_HTTP_CLIENT
                                         .post(&current_settings.helius_sender_endpoint)
                                         .json(&body).send().await?;
@@ -1153,6 +1239,7 @@ async fn main() -> Result<()> {
                             );
                         }
                         stats.total_buys.fetch_add(1, Ordering::Relaxed);
+                        if let Err(e) = runtime.record_trade(serde_json::json!({"network":"solana","side":"buy","mint":mint,"amount":holding.amount,"price":holding.buy_price,"cost_native":holding.buy_cost_sol,"dry_run":!is_real,"signature":holding.buy_signature,"latency_ms":pipeline_ms})) { error!("Trade journal: {}",e); }
                         let target_slot = detected.slot.unwrap_or(0);
                         // Query our TX slot asynchronously (best effort)
                         let our_slot_str = if let Some(ref sig) = holding.buy_signature {
@@ -1312,16 +1399,16 @@ fn log_config_summary(settings: &Settings, is_real: bool) {
 
     // RPC
     for (i, url) in settings.solana_rpc_urls.iter().enumerate() {
-        info!("  RPC [{}]:         {}", i, url);
+        info!("  RPC [{}]:         {}", i, endpoint_origin(url));
     }
     for (i, url) in settings.solana_ws_urls.iter().enumerate() {
-        info!("  WSS [{}]:         {}", i, url);
+        info!("  WSS [{}]:         {}", i, endpoint_origin(url));
     }
 
     // Helius / Jito
     info!("  Helius sender:   {}", if settings.helius_sender_enabled { "ON" } else { "OFF" });
     if settings.helius_sender_enabled {
-        info!("  Helius endpoint: {}", settings.helius_sender_endpoint);
+        info!("  Helius endpoint: {}", endpoint_origin(&settings.helius_sender_endpoint));
         info!("  Routing:         {}", if settings.helius_use_swqos_only { "SWQOS-only" } else { "dual (validators + Jito)" });
         info!("  Min tip:         {:.9} SOL", settings.helius_min_tip_sol);
         info!("  Dynamic tips:    {}", if settings.helius_use_dynamic_tips { "ON" } else { "OFF" });
@@ -1343,10 +1430,10 @@ fn log_config_summary(settings: &Settings, is_real: bool) {
     // Listener
     info!("  Listener mode:   {}", settings.listener_mode);
     if settings.listener_mode == "shreds" {
-        info!("  Shreds URL:      {}", settings.shreds_url);
+        info!("  Shreds URL:      {}", endpoint_origin(&settings.shreds_url));
     }
     if settings.listener_mode == "geyser" {
-        info!("  Geyser URL:      {}", settings.geyser_url);
+        info!("  Geyser URL:      {}", endpoint_origin(&settings.geyser_url));
     }
 
     // Pump.fun
@@ -1373,8 +1460,14 @@ async fn run_sell_executor(
     cached_fee_recipients: Option<&buyer::CachedFeeRecipients>,
     swqos_sender: Option<&Arc<swqos_sender::SwqosSender>>,
     leader_cache: &LeaderCache,
+    runtime: &runtime::RuntimeState,
 ) {
     while let Some(order) = sell_rx.recv().await {
+        if is_real && !runtime.live_enabled() {
+            warn!("Live sell paused: panel authorization revoked");
+            monitor.clear_pending_sell(&order.mint).await;
+            continue;
+        }
         // Skip if position was already fully exited by a prior sell (prevents double-sells)
         if !monitor.has_position(&order.mint).await {
             debug!("SKIP {} sell: no longer holding {}", order.reason, order.mint);
@@ -1446,6 +1539,11 @@ async fn run_sell_executor(
                                         "method": "sendTransaction",
                                         "params": [tx_base64, {"encoding": "base64", "skipPreflight": true}]
                                     });
+                                    if let Err(e)=runtime::require_live_authorization() {
+                                        warn!("Live sell paused before broadcast: {}",e);
+                                        monitor.clear_pending_sell(&order.mint).await;
+                                        continue;
+                                    }
                                     let resp = match crate::rpc::SHARED_HTTP_CLIENT
                                         .post(&settings.helius_sender_endpoint)
                                         .json(&body).send().await {
@@ -1527,6 +1625,11 @@ async fn run_sell_executor(
                                         "method": "sendTransaction",
                                         "params": [tx_base64, {"encoding": "base64", "skipPreflight": true}]
                                     });
+                                    if let Err(e)=runtime::require_live_authorization() {
+                                        warn!("Live sell paused before broadcast: {}",e);
+                                        monitor.clear_pending_sell(&order.mint).await;
+                                        continue;
+                                    }
                                     let resp = match crate::rpc::SHARED_HTTP_CLIENT
                                         .post(&settings.helius_sender_endpoint)
                                         .json(&body).send().await {
@@ -1571,11 +1674,14 @@ async fn run_sell_executor(
             Ok(result) => {
                 let sell_ms = sell_start.elapsed().as_millis();
                 stats.total_sells.fetch_add(1, Ordering::Relaxed);
+                let basis = monitor.get_positions().await.get(&order.mint).cloned();
+                let realized_pnl = result.sol_balance_change.and_then(|received|basis.as_ref().and_then(|holding|runtime::realized_pnl(received,holding.buy_cost_sol,holding.original_amount,order.amount)));
+                if let Err(e) = runtime.record_trade(serde_json::json!({"realized_pnl_native":realized_pnl,"status":if !is_real{"paper"}else if result.sol_balance_change.is_some(){"receipts_observed"}else{"no_receipt_evidence"},"network":"solana","side":"sell","mint":order.mint,"amount":order.amount,"price":order.current_price,"received_native":result.sol_balance_change,"dry_run":!is_real,"latency_ms":sell_ms})) { error!("Trade journal: {}",e); }
                 if let Some(sol_change) = result.sol_balance_change {
-                    stats.add_pnl_sol(sol_change);
+                    if let Some(pnl) = realized_pnl { stats.add_pnl_sol(pnl); }
                     info!("Sell executed for {}: received {:.9} SOL | TIMING sell: {}ms", order.mint, sol_change, sell_ms);
                 } else {
-                    info!("Sell executed for {} (dry-run) | TIMING sell: {}ms", order.mint, sell_ms);
+                    info!("Sell processing completed for {} ({}) | TIMING sell: {}ms", order.mint, if is_real {"net receipt evidence unavailable"} else {"dry-run"}, sell_ms);
                 }
                 // Update position in monitor
                 monitor.update_after_sell(
@@ -1635,12 +1741,13 @@ async fn run_config_watcher(config_path: String, shared_settings: Arc<ArcSwap<Se
 
         // Reload settings
         match Settings::from_file(&config_path) {
-            Ok(new_settings) => {
+            Ok(incoming) => {
+                let old = shared_settings.load();
+                let new_settings = old.with_reloaded_risk(&incoming);
                 if let Err(e) = new_settings.validate() {
                     warn!("Config reload validation failed (keeping old settings): {}", e);
                     continue;
                 }
-                let old = shared_settings.load();
                 log_settings_diff(&old, &new_settings);
                 shared_settings.store(Arc::new(new_settings));
                 info!("Config hot-reloaded from {}", config_path);
@@ -1684,4 +1791,8 @@ fn log_settings_diff(old: &Settings, new: &Settings) {
     if old.shreds_url != new.shreds_url {
         info!("  Config changed: shreds_url {} -> {} (requires restart)", old.shreds_url, new.shreds_url);
     }
+}
+
+fn endpoint_origin(value: &str) -> String {
+    url::Url::parse(value).map(|u|u.origin().ascii_serialization()).unwrap_or_else(|_|"[configured endpoint]".into())
 }

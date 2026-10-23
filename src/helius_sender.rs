@@ -434,6 +434,10 @@ pub async fn send_transaction_via_helius(
             if is_zeroslot && !zeroslot_key.is_empty() {
                 req = req.header("x-api-key", &zeroslot_key);
             }
+            if let Err(error) = crate::runtime::require_live_authorization() {
+                warn!("TX via {} blocked: {}", name, error);
+                return;
+            }
             match req.send().await {
                 Ok(resp) => {
                     let status = resp.status();
@@ -453,6 +457,7 @@ pub async fn send_transaction_via_helius(
     }
 
     // Primary send via Helius/Jito
+    crate::runtime::require_live_authorization()?;
     let response = shared_client()
         .post(&endpoint)
         .json(&send_payload)

@@ -1717,8 +1717,8 @@ pub async fn sell_token(
             }
         };
         if pre_sell_balance == 0 {
-            warn!("Sell {}: 0 tokens on-chain (ATA: {}). Already sold or buy failed. Cleaning up position.", mint, ata);
-            return Ok(SellResult { sol_balance_change: Some(0.0), tx_fee_sol: None });
+            warn!("Sell {}: 0 tokens on-chain (ATA: {}). Already sold or buy failed; no sale receipt. Cleaning up position.", mint, ata);
+            return Ok(SellResult { sol_balance_change: None, tx_fee_sol: None });
         }
         info!("Pre-sell balance for {}: {} base units", mint, pre_sell_balance);
 
@@ -1791,6 +1791,7 @@ pub async fn sell_token(
             let mut tx = Transaction::new_with_payer(&all_instrs, Some(&payer.pubkey()));
             let blockhash = client.get_latest_blockhash()?;
             tx.sign(&[payer], blockhash);
+            crate::runtime::require_live_authorization()?;
             let sig = client.send_and_confirm_transaction(&tx)?;
             signature = sig.to_string();
         }

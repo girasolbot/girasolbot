@@ -1,62 +1,107 @@
-//! API-key management panel — minimal HTTP server (no framework) exposing the
-//! encrypted vault behind existing-style bearer auth.
-//!
-//! Endpoints (all require `Authorization: Bearer <PANEL_AUTH_TOKEN>`):
-//!   GET  /api/panel/keys            → masked status for every slot
-//!   POST /api/panel/keys/{slot}     → body: {"value": "<key>"} (empty deletes)
-//!   DELETE /api/panel/keys/{slot}   → delete stored key
-//!   GET  /api/panel/health          → vault file health
-//!   GET  /                          → minimal web UI (single page)
-//!
-//! Security notes:
-//!   - Bind address defaults to 127.0.0.1 (loopback only). Use the
-//!     `SNIPER_PANEL_BIND` env var to change (e.g. a tailscale/wg address).
-//!   - PANEL_AUTH_TOKEN env var must be set or the panel refuses to start.
-//!   - Keys are never returned in plaintext over the API — masked only.
-//!   - tips/free-friendly providers are flagged in the UI and sorted first.
-
+//! Local dashboard. HTML is public; every API request requires bearer auth.
+//! Token is generated once in DATA_DIR/panel-auth-token (0600), never in HTML.
 use crate::api_key_vault::{ApiKeyVault, API_KEY_SLOTS};
-use std::sync::Arc;
+use serde_json::{json, Value};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-/// Panel server. Owns the vault and serves the REST API + minimal UI.
+const MAX_HEADERS: usize = 16 * 1024;
+const MAX_BODY: usize = 64 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+pub const LIVE_CONFIRMATION: &str = "I UNDERSTAND REAL FUNDS ARE AT RISK";
+
 pub struct KeyPanel {
     vault: Arc<ApiKeyVault>,
     auth_token: String,
+    data_dir: PathBuf,
+    runtime: Arc<crate::runtime::RuntimeState>,
 }
 
-/// Start the panel on the given addr. Returns a JoinHandle for the listener.
-pub async fn start_panel(bind_addr: &str, data_dir: std::path::PathBuf) -> Result<(), String> {
-    let auth_token = match std::env::var("PANEL_AUTH_TOKEN") {
-        Ok(t) if t.trim().len() >= 8 => t.trim().to_string(),
-        Ok(_) => {
-            return Err("PANEL_AUTH_TOKEN is set but too short (min 8 chars)".to_string());
+fn local_token(data_dir: &Path) -> Result<String, String> {
+    use rand::RngCore;
+    let path = data_dir.join("panel-auth-token");
+    if let Ok(token) = std::env::var("PANEL_AUTH_TOKEN") {
+        return if token.trim().len() >= 16 {
+            Ok(token.trim().to_owned())
+        } else {
+            Err("PANEL_AUTH_TOKEN must contain at least 16 characters".into())
+        };
+    }
+    std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
+    if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+        if !metadata.is_file() {
+            return Err("panel-auth-token must be a regular file".into());
         }
-        Err(_) => {
-            log::info!("key panel: PANEL_AUTH_TOKEN not set — panel disabled");
-            return Ok(());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
         }
-    };
+        let token = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        if token.trim().len() < 16 {
+            return Err("stored panel token is invalid".into());
+        }
+        return Ok(token.trim().into());
+    }
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let token = hex::encode(bytes);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    use std::io::Write;
+    options
+        .open(&path)
+        .and_then(|mut f| {
+            f.write_all(token.as_bytes())?;
+            f.sync_all()
+        })
+        .map_err(|e| e.to_string())?;
+    log::info!("Panel bearer token saved to {}", path.display());
+    Ok(token)
+}
 
-    let vault = Arc::new(ApiKeyVault::new(data_dir));
-    let panel = Arc::new(KeyPanel { vault, auth_token });
+pub async fn start_panel(
+    bind_addr: &str,
+    data_dir: PathBuf,
+    runtime: Arc<crate::runtime::RuntimeState>,
+    vault: Arc<ApiKeyVault>,
+) -> Result<(), String> {
+    let auth_token = local_token(&data_dir)?;
+    let panel = Arc::new(KeyPanel {
+        vault,
+        data_dir,
+        auth_token,
+        runtime,
+    });
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
-        .map_err(|e| format!("panel bind {} failed: {}", bind_addr, e))?;
-    log::info!("Key panel listening on http://{} (auth: bearer token)", bind_addr);
-
+        .map_err(|e| format!("panel bind failed: {}", e))?;
+    let slots = Arc::new(tokio::sync::Semaphore::new(32));
+    log::info!("Girasol dashboard: http://{}", bind_addr);
     loop {
-        match listener.accept().await {
-            Ok((stream, _peer)) => {
-                let panel = Arc::clone(&panel);
-                tokio::spawn(async move {
-                    let _ = handle_connection(stream, panel).await;
-                });
+        let (stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
+        let permit = match slots.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                drop(stream);
+                continue;
             }
-            Err(e) => {
-                log::warn!("panel accept error: {}", e);
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
+        };
+        let panel = panel.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let _ = handle_connection(stream, panel).await;
+        });
     }
 }
 
@@ -67,278 +112,539 @@ struct Request {
     body: Vec<u8>,
 }
 
-/// Read one HTTP request (headers + body). Supports Content-Length only.
-async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<Request> {
-    use tokio::io::AsyncReadExt;
-    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+async fn read_request(stream: &mut tokio::net::TcpStream) -> Result<Request, u16> {
+    let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
-    // Read until \r\n\r\n (end of headers)
-    let header_end;
-    loop {
-        let n = stream.read(&mut chunk).await.ok()?;
+    let header_end = loop {
+        let n = stream.read(&mut chunk).await.map_err(|_| 400u16)?;
         if n == 0 {
-            return None;
+            return Err(400);
         }
         buf.extend_from_slice(&chunk[..n]);
         if let Some(pos) = find_subsequence(&buf, b"\r\n\r\n") {
-            header_end = pos;
-            break;
-        }
-        if buf.len() > 64 * 1024 {
-            return None; // header too large
-        }
-    }
-    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
-    let mut lines = head.lines();
-    let request_line = lines.next()?;
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next()?.to_string();
-    let raw_path = parts.next()?.to_string();
-    let path = raw_path.split('?').next().unwrap_or("").to_string();
-    let mut auth = None;
-    let mut content_length = 0usize;
-    for line in lines {
-        if let Some((k, v)) = line.split_once(':') {
-            let k = k.trim().to_ascii_lowercase();
-            let v = v.trim().to_string();
-            if k == "authorization" {
-                auth = Some(v);
-            } else if k == "content-length" {
-                content_length = v.parse().unwrap_or(0);
+            if pos > MAX_HEADERS {
+                return Err(413);
             }
+            break pos;
+        }
+        if buf.len() > MAX_HEADERS {
+            return Err(413);
+        }
+    };
+    let head = std::str::from_utf8(&buf[..header_end]).map_err(|_| 400u16)?;
+    let mut lines = head.split("\r\n");
+    let parts: Vec<_> = lines.next().ok_or(400u16)?.split_whitespace().collect();
+    if parts.len() != 3 || parts[2] != "HTTP/1.1" {
+        return Err(400);
+    }
+    let method = parts[0].to_owned();
+    let path = parts[1].to_owned();
+    let mut auth = None;
+    let mut length = None;
+    for line in lines {
+        let (name, value) = line.split_once(':').ok_or(400u16)?;
+        match name.to_ascii_lowercase().as_str() {
+            "authorization" => {
+                if auth.is_some() {
+                    return Err(400);
+                }
+                auth = Some(value.trim().to_owned());
+            }
+            "content-length" => {
+                if length.is_some() {
+                    return Err(400);
+                }
+                let v = value.trim();
+                if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(400);
+                }
+                length = Some(v.parse::<usize>().map_err(|_| 413u16)?);
+            }
+            "transfer-encoding" => return Err(400),
+            _ => {}
         }
     }
-    if content_length > 256 * 1024 {
-        return None; // body too large
+    let length = length.unwrap_or(0);
+    if length > MAX_BODY {
+        return Err(413);
     }
     let mut body = buf[header_end + 4..].to_vec();
-    while body.len() < content_length {
-        let n = stream.read(&mut chunk).await.ok()?;
+    while body.len() < length {
+        let remaining = (length - body.len()).min(chunk.len());
+        let n = stream
+            .read(&mut chunk[..remaining])
+            .await
+            .map_err(|_| 400u16)?;
         if n == 0 {
-            break;
+            return Err(400);
         }
         body.extend_from_slice(&chunk[..n]);
     }
-    body.truncate(content_length);
-    Some(Request { method, path, auth, body })
+    body.truncate(length);
+    Ok(Request {
+        method,
+        path,
+        auth,
+        body,
+    })
 }
-
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
-
-/// Write a minimal HTTP response and shutdown.
 async fn write_response(
     stream: &mut tokio::net::TcpStream,
     status: u16,
     content_type: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
-        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        413 => "Content Too Large",
         500 => "Internal Server Error",
-        _ => "Unknown",
+        504 => "Gateway Timeout",
+        _ => "Error",
     };
-    let head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
-        status, reason, content_type, body.len()
-    );
+    let head = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\r\nConnection: close\r\n\r\n", body.len());
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body).await?;
-    stream.flush().await?;
-    Ok(())
+    stream.shutdown().await
 }
-
-fn json_response(status: u16, value: serde_json::Value) -> (u16, String, Vec<u8>) {
-    (status, "application/json".to_string(), serde_json::to_vec(&value).unwrap_or_default())
+fn json_response(status: u16, value: Value) -> (u16, String, Vec<u8>) {
+    (
+        status,
+        "application/json".into(),
+        serde_json::to_vec(&value).unwrap_or_default(),
+    )
 }
-
-async fn handle_connection(mut stream: tokio::net::TcpStream, panel: Arc<KeyPanel>) -> std::io::Result<()> {
-    let req = match read_request(&mut stream).await {
-        Some(r) => r,
-        None => return Ok(()),
+async fn handle_connection(
+    mut stream: tokio::net::TcpStream,
+    panel: Arc<KeyPanel>,
+) -> std::io::Result<()> {
+    let response = match tokio::time::timeout(REQUEST_TIMEOUT, read_request(&mut stream)).await {
+        Ok(Ok(req)) => {
+            match tokio::time::timeout(Duration::from_secs(120), panel.route(&req)).await {
+                Ok(response) => response,
+                Err(_) => json_response(504, json!({"error":"operation timed out"})),
+            }
+        }
+        Ok(Err(status)) => json_response(status, json!({"error":"invalid HTTP request"})),
+        Err(_) => json_response(408, json!({"error":"request timed out"})),
     };
-    let (status, ctype, body) = panel.route(&req).await;
-    write_response(&mut stream, status, &ctype, &body).await?;
+    let _ = tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        write_response(&mut stream, response.0, &response.1, &response.2),
+    )
+    .await;
     Ok(())
 }
-
 impl KeyPanel {
     fn authorize(&self, req: &Request) -> bool {
-        match &req.auth {
-            Some(a) => match a.strip_prefix("Bearer ") {
-                Some(token) => constant_time_eq(token.trim(), &self.auth_token),
-                None => false,
-            },
-            None => false,
-        }
+        req.auth
+            .as_deref()
+            .and_then(|a| a.strip_prefix("Bearer "))
+            .is_some_and(|token| constant_time_eq(token, &self.auth_token))
     }
-
     async fn route(&self, req: &Request) -> (u16, String, Vec<u8>) {
-        match (req.method.as_str(), req.path.as_str()) {
-            ("GET", "/") | ("GET", "/index.html") => {
-                (200, "text/html; charset=utf-8".to_string(), render_index().into_bytes())
+        let (path, query) = req.path.split_once('?').unwrap_or((&req.path, ""));
+        if req.method == "GET" && ["/", "/index.html"].contains(&path) {
+            return (
+                200,
+                "text/html; charset=utf-8".into(),
+                render_index().into_bytes(),
+            );
+        }
+        if !self.authorize(req) {
+            return json_response(401, json!({"error":"unauthorized"}));
+        }
+        let network = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("network="))
+            .unwrap_or("solana");
+        if !["solana", "robinhood", "elysium"].contains(&network) {
+            return json_response(400, json!({"error":"unknown network"}));
+        }
+        let body = if req.method == "POST" {
+            match serde_json::from_slice::<Value>(&req.body) {
+                Ok(v) if v.is_object() => v,
+                _ => return json_response(400, json!({"error":"expected a JSON object"})),
             }
-            ("GET", "/api/panel/keys") => {
-                if !self.authorize(req) {
-                    return json_response(401, serde_json::json!({"error": "unauthorized"}));
-                }
-                let statuses = self.vault.statuses().await;
-                // tips-friendly first, then free, then freemium, then subscription
-                let rank = |p: &str| match p {
-                    "tips" => 0,
-                    "free" => 1,
-                    "freemium" => 2,
-                    _ => 3,
+        } else {
+            Value::Null
+        };
+        let result = match (req.method.as_str(), path) {
+            ("GET", "/api/panel/keys") => json!({"keys":self.vault.statuses().await}),
+            ("GET", "/api/panel/health") => self.vault.vault_health(),
+            ("GET", "/api/panel/slots") => {
+                json!({"slots":API_KEY_SLOTS.iter().map(|s| json!({"id":s.id,"label":s.label,"pricing":s.pricing.as_str()})).collect::<Vec<_>>()})
+            }
+            ("GET", "/api/panel/status") => self.runtime.status(),
+            ("GET", "/api/panel/positions") => {
+                dataset(&self.data_dir.join("panel-positions.json"), network).await
+            }
+            ("GET", "/api/panel/history") => {
+                dataset(&self.data_dir.join("trades.json"), network).await
+            }
+            ("GET", "/api/panel/pnl") => {
+                json!({"realized":null,"unrealized":null,"available":false,"reason":"A complete cost basis, execution prices and fees are required. Trade history is available separately."})
+            }
+            ("GET", "/api/panel/logs") => read_logs().await,
+            ("POST", "/api/panel/live") => {
+                let Some(enabled) = body.get("enabled").and_then(Value::as_bool) else {
+                    return json_response(400, json!({"error":"enabled must be boolean"}));
                 };
-                let mut sorted = statuses;
-                sorted.sort_by_key(|s| rank(&s.pricing));
-                json_response(200, serde_json::json!({ "keys": sorted }))
-            }
-            ("GET", "/api/panel/health") => {
-                if !self.authorize(req) {
-                    return json_response(401, serde_json::json!({"error": "unauthorized"}));
+                if enabled && body["confirmation"].as_str() != Some(LIVE_CONFIRMATION) {
+                    return json_response(
+                        400,
+                        json!({"error":"exact live confirmation phrase required"}),
+                    );
                 }
-                json_response(200, self.vault.vault_health())
+                self.runtime.set_live_confirmation(enabled);
+                if enabled && !self.runtime.live_enabled() {
+                    return json_response(
+                        403,
+                        json!({"error":"Live trading was not authorized at startup. Restart with --real."}),
+                    );
+                }
+                self.runtime.status()
             }
             ("POST", p) if p.starts_with("/api/panel/keys/") => {
-                if !self.authorize(req) {
-                    return json_response(401, serde_json::json!({"error": "unauthorized"}));
-                }
-                let slot_id = p.trim_start_matches("/api/panel/keys/");
-                let parsed: Result<serde_json::Value, _> = serde_json::from_slice(&req.body);
-                let value = match parsed {
-                    Ok(v) => v.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                    Err(_) => String::new(),
+                let slot = &p["/api/panel/keys/".len()..];
+                let Some(value) = body["value"].as_str() else {
+                    return json_response(400, json!({"error":"value must be a string"}));
                 };
-                match self.vault.set_api_key(slot_id, &value).await {
-                    Ok(()) => json_response(200, serde_json::json!({"ok": true, "slot": slot_id})),
-                    Err(e) => json_response(400, serde_json::json!({"error": e})),
+                if value.trim().is_empty() {
+                    return json_response(400, json!({"error":"use DELETE to remove a key"}));
+                }
+                match self.vault.set_api_key(slot, value).await {
+                    Ok(()) => json!({"ok":true}),
+                    Err(e) => return json_response(400, json!({"error":e})),
                 }
             }
             ("DELETE", p) if p.starts_with("/api/panel/keys/") => {
-                if !self.authorize(req) {
-                    return json_response(401, serde_json::json!({"error": "unauthorized"}));
-                }
-                let slot_id = p.trim_start_matches("/api/panel/keys/");
-                match self.vault.set_api_key(slot_id, "").await {
-                    Ok(()) => json_response(200, serde_json::json!({"ok": true, "deleted": slot_id})),
-                    Err(e) => json_response(400, serde_json::json!({"error": e})),
+                match self
+                    .vault
+                    .set_api_key(&p["/api/panel/keys/".len()..], "")
+                    .await
+                {
+                    Ok(()) => json!({"ok":true}),
+                    Err(e) => return json_response(400, json!({"error":e})),
                 }
             }
-            ("GET", "/api/panel/slots") => {
-                if !self.authorize(req) {
-                    return json_response(401, serde_json::json!({"error": "unauthorized"}));
+            ("GET", "/api/intelligence/status")
+            | (
+                "POST",
+                "/api/intelligence/profile"
+                | "/api/intelligence/strategy"
+                | "/api/intelligence/replan"
+                | "/api/intelligence/underworld"
+                | "/api/intelligence/paper"
+                | "/api/ai/chat",
+            ) => {
+                match crate::intelligence::handle_api(
+                    path,
+                    body,
+                    network,
+                    &self.data_dir,
+                    &self.vault,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => return json_response(400, json!({"error":e})),
                 }
-                let slots: Vec<serde_json::Value> = API_KEY_SLOTS
-                    .iter()
-                    .map(|s| serde_json::json!({"id": s.id, "label": s.label, "pricing": s.pricing.as_str()}))
-                    .collect();
-                json_response(200, serde_json::json!({ "slots": slots }))
             }
-            (m, _) if m == "POST" || m == "DELETE" => {
-                json_response(404, serde_json::json!({"error": "not found"}))
-            }
-            (_, _) => json_response(404, serde_json::json!({"error": "not found"})),
-        }
+            _ => return json_response(404, json!({"error":"not found"})),
+        };
+        json_response(200, result)
     }
 }
-
-/// Constant-time string comparison for bearer tokens.
+async fn dataset(path: &Path, network: &str) -> Value {
+    let bytes = match tokio::fs::File::open(path).await {
+        Ok(file) => {
+            let mut bytes = Vec::new();
+            if file
+                .take(4 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .await
+                .is_err()
+                || bytes.len() > 4 * 1024 * 1024
+            {
+                return json!({"available":false,"error":"snapshot exceeds read limit"});
+            }
+            bytes
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return json!({"available":false,"items":[],"reason":"No runtime observations yet"})
+        }
+        Err(_) => return json!({"available":false,"error":"snapshot unavailable"}),
+    };
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) => {
+            let items: Vec<Value> = match value {
+                Value::Array(a) => a,
+                Value::Object(o) => o
+                    .into_iter()
+                    .map(|(id, mut v)| {
+                        if let Some(o) = v.as_object_mut() {
+                            o.entry("asset").or_insert(Value::String(id));
+                        }
+                        v
+                    })
+                    .collect(),
+                _ => return json!({"available":false,"error":"invalid snapshot format"}),
+            };
+            let filtered: Vec<_> = items
+                .into_iter()
+                .filter(|v| v["network"].as_str().unwrap_or("solana") == network)
+                .rev()
+                .take(200)
+                .collect();
+            json!({"available":true,"items":filtered,"limit":200})
+        }
+        Err(_) => json!({"available":false,"error":"invalid snapshot JSON"}),
+    }
+}
+async fn read_logs() -> Value {
+    let path = Path::new("logs/sniper.log");
+    match tokio::fs::File::open(path).await {
+        Ok(mut file) => {
+            let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+            let _ = file
+                .seek(std::io::SeekFrom::Start(len.saturating_sub(64 * 1024)))
+                .await;
+            let mut bytes = Vec::new();
+            let _ = file.take(64 * 1024).read_to_end(&mut bytes).await;
+            let text = String::from_utf8_lossy(&bytes);
+            // Existing logs may include transport URLs with credentials: redact entire sensitive lines.
+            let lines: Vec<String> = text
+                .lines()
+                .rev()
+                .take(100)
+                .map(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    if [
+                        "http://",
+                        "https://",
+                        "wss://",
+                        "token",
+                        "secret",
+                        "private",
+                        "api_key",
+                        "api-key",
+                        "authorization",
+                        "password",
+                    ]
+                    .iter()
+                    .any(|s| lower.contains(s))
+                    {
+                        "[sensitive transport/configuration line redacted]".into()
+                    } else {
+                        line.chars().take(1000).collect()
+                    }
+                })
+                .collect();
+            json!({"available":true,"lines":lines.into_iter().rev().collect::<Vec<_>>()})
+        }
+        Err(_) => json!({"available":false,"lines":[],"reason":"Log file has not been created"}),
+    }
+}
 fn constant_time_eq(a: &str, b: &str) -> bool {
     use sha2::{Digest, Sha256};
-    let ha = Sha256::digest(a.as_bytes());
-    let hb = Sha256::digest(b.as_bytes());
-    let mut diff = 0u8;
-    for i in 0..32 {
-        diff |= ha[i] ^ hb[i];
-    }
-    diff == 0
+    let a = Sha256::digest(a.as_bytes());
+    let b = Sha256::digest(b.as_bytes());
+    a.iter().zip(b.iter()).fold(0u8, |d, (a, b)| d | (a ^ b)) == 0
 }
-
-/// Minimal single-page web UI. Vanilla JS, no external assets.
 fn render_index() -> String {
-    let rows = API_KEY_SLOTS
-        .iter()
-        .map(|s| {
-            let tips_flag = if s.pricing.as_str() == "tips" {
-                r#"<span class="flag tips">tips-friendly</span>"#.to_string()
-            } else if s.pricing.as_str() == "free" {
-                r#"<span class="flag free">free</span>"#.to_string()
-            } else {
-                String::new()
-            };
-            format!(
-                r#"<tr data-slot="{id}" data-pricing="{pricing}"><td><b>{label}</b> {flag}<div class="purpose">{purpose}</div><div class="meta">env: {env} · <a href="{signup}" target="_blank" rel="noopener">get key</a></div></td>
-<td><div class="masked" id="masked-{id}">—</div></td>
-<td><input type="password" id="input-{id}" placeholder="{placeholder}" autocomplete="off"><button onclick="saveKey('{id}')">Save</button><button class="del" onclick="deleteKey('{id}')">Delete</button></td></tr>"#,
-                id = s.id, label = s.label, pricing = s.pricing.as_str(), flag = tips_flag,
-                purpose = s.purpose, env = s.env_var, signup = s.signup_url, placeholder = s.placeholder,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Girasol API-key panel</title>
-<style>
-body {{ font-family: system-ui, sans-serif; max-width: 1080px; margin: 2rem auto; padding: 0 1rem; color: #1a1a2e; }}
-h1 {{ font-size: 1.4rem; }} h1 span {{ color: #e6a817; }}
-table {{ border-collapse: collapse; width: 100%; }}
-td {{ border-bottom: 1px solid #e5e5ea; padding: .7rem .5rem; vertical-align: top; }}
-.purpose {{ color: #666; font-size: .85rem; margin-top: .25rem; }}
-.meta {{ color: #999; font-size: .75rem; margin-top: .25rem; }}
-.masked {{ font-family: monospace; }}
-input {{ width: 240px; padding: .3rem; }}
-button {{ margin-left: .4rem; padding: .3rem .7rem; cursor: pointer; }}
-button.del {{ color: #b00020; }}
-.flag {{ font-size: .7rem; padding: .1rem .4rem; border-radius: 3px; vertical-align: middle; }}
-.flag.tips {{ background: #fff3d6; color: #8a6100; }}
-.flag.free {{ background: #e2f5e9; color: #1c6b38; }}
-#auth {{ margin: 1rem 0; }}
-#status {{ color: #666; font-size: .85rem; margin-left: 1rem; }}
-</style></head><body>
-<h1>🌻 Girasol <span>API-key panel</span></h1>
-<p>Keys are stored encrypted (AES-256-GCM) in <code>data/apikeys.enc.json</code> and are never returned in plaintext. tips/free-friendly providers are listed first.</p>
-<div id="auth"><label>Panel token: <input type="password" id="token" autocomplete="off" style="width:280px"></label><button onclick="loadKeys()">Load keys</button><span id="status"></span></div>
-<table id="tbl"><thead><tr><th>Provider</th><th>Stored</th><th>Update</th></tr></thead><tbody>{rows}</tbody></table>
-<script>
-function headers() {{ return {{ 'Authorization': 'Bearer ' + document.getElementById('token').value, 'Content-Type': 'application/json' }}; }}
-async function loadKeys() {{
-  const r = await fetch('/api/panel/keys', {{ headers: headers() }});
-  const el = document.getElementById('status');
-  if (r.status === 401) {{ el.textContent = 'unauthorized'; return; }}
-  const data = await r.json();
-  for (const k of data.keys) {{
-    const m = document.getElementById('masked-' + k.id);
-    if (m) m.textContent = k.configured ? (k.masked + ' (' + k.source + ')') : '—';
-  }}
-  el.textContent = 'loaded';
-}}
-async function saveKey(id) {{
-  const value = document.getElementById('input-' + id).value;
-  const r = await fetch('/api/panel/keys/' + id, {{ method: 'POST', headers: headers(), body: JSON.stringify({{ value }}) }});
-  document.getElementById('status').textContent = r.ok ? 'saved ' + id : 'error ' + r.status;
-  loadKeys();
-}}
-async function deleteKey(id) {{
-  const r = await fetch('/api/panel/keys/' + id, {{ method: 'DELETE', headers: headers() }});
-  document.getElementById('status').textContent = r.ok ? 'deleted ' + id : 'error ' + r.status;
-  loadKeys();
-}}
-</script></body></html>"#,
-        rows = rows
-    )
+    include_str!("panel.html").to_owned()
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn malformed_json_preserves_key() {
+        let _env = crate::api_key_vault::tests::ENV_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("panel-malformed-{}", std::process::id()));
+        let panel = KeyPanel {
+            vault: Arc::new(ApiKeyVault::new(dir)),
+            auth_token: "secret-token-1".into(),
+            data_dir: std::env::temp_dir(),
+            runtime: Arc::new(crate::runtime::RuntimeState::new(false)),
+        };
+        panel
+            .vault
+            .set_api_key("jito", "keep-this-secret")
+            .await
+            .unwrap();
+        for body in ["{", "{}", "{\"value\":null}", "{\"value\":42}"] {
+            let req = Request {
+                method: "POST".into(),
+                path: "/api/panel/keys/jito".into(),
+                auth: Some("Bearer secret-token-1".into()),
+                body: body.as_bytes().to_vec(),
+            };
+            assert_eq!(panel.route(&req).await.0, 400);
+            assert_eq!(
+                panel.vault.get_api_key("jito").await.as_deref(),
+                Some("keep-this-secret")
+            );
+        }
+    }
+
+    fn test_panel(tag: &str, allow_live: bool) -> Arc<KeyPanel> {
+        let dir =
+            std::env::temp_dir().join(format!("girasol-panel-{}-{}", tag, rand::random::<u64>()));
+        Arc::new(KeyPanel {
+            vault: Arc::new(ApiKeyVault::new(dir.clone())),
+            auth_token: "test-bearer-token".into(),
+            data_dir: dir,
+            runtime: Arc::new(crate::runtime::RuntimeState::new(allow_live)),
+        })
+    }
+    async fn http(panel: Arc<KeyPanel>, raw: &[u8]) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connection(stream, panel).await.unwrap();
+        });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client.write_all(raw).await.unwrap();
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(8), client.read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+    #[tokio::test]
+    async fn http_auth_html_and_body_cap_smoke() {
+        let panel = test_panel("http", false);
+        assert!(
+            http(panel.clone(), b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .starts_with("HTTP/1.1 200")
+        );
+        for path in ["status", "keys", "positions", "history", "pnl", "logs"] {
+            let request = format!("GET /api/panel/{path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            assert!(http(panel.clone(), request.as_bytes())
+                .await
+                .starts_with("HTTP/1.1 401"));
+        }
+        assert!(http(
+            panel.clone(),
+            b"GET /api/panel/status HTTP/1.1\r\nAuthorization: Bearer test-bearer-token\r\n\r\n"
+        )
+        .await
+        .starts_with("HTTP/1.1 200"));
+        assert!(http(
+            panel.clone(),
+            b"POST /api/panel/keys/jito HTTP/1.1\r\nContent-Length: 65537\r\n\r\n"
+        )
+        .await
+        .starts_with("HTTP/1.1 413"));
+        assert!(http(
+            panel.clone(),
+            b"POST /api/panel/keys/jito HTTP/1.1\r\nContent-Length: rubbish\r\n\r\n"
+        )
+        .await
+        .starts_with("HTTP/1.1 400"));
+        let mut oversized = b"GET / HTTP/1.1\r\nX-Test: ".to_vec();
+        oversized.extend(vec![b'a'; MAX_HEADERS]);
+        oversized.extend_from_slice(b"\r\n\r\n");
+        assert!(http(panel, &oversized).await.starts_with("HTTP/1.1 413"));
+    }
+    #[tokio::test]
+    async fn http_partial_request_times_out() {
+        assert!(http(test_panel("timeout", false), b"GET / HTTP/1.1\r\n")
+            .await
+            .starts_with("HTTP/1.1 408"));
+    }
+    #[tokio::test]
+    async fn live_needs_phrase_and_cli_authorization() {
+        for allow in [false, true] {
+            let panel = test_panel("live", allow);
+            let mut req = Request {
+                method: "POST".into(),
+                path: "/api/panel/live".into(),
+                auth: Some("Bearer test-bearer-token".into()),
+                body: serde_json::to_vec(&json!({"enabled":true,"confirmation":"yes"})).unwrap(),
+            };
+            assert_eq!(panel.route(&req).await.0, 400);
+            assert!(!panel.runtime.live_enabled());
+            req.body =
+                serde_json::to_vec(&json!({"enabled":true,"confirmation":LIVE_CONFIRMATION}))
+                    .unwrap();
+            assert_eq!(panel.route(&req).await.0, if allow { 200 } else { 403 });
+            assert_eq!(panel.runtime.live_enabled(), allow);
+            req.body = serde_json::to_vec(&json!({"enabled":false})).unwrap();
+            assert_eq!(panel.route(&req).await.0, 200);
+            assert!(!panel.runtime.live_enabled());
+        }
+    }
+    #[tokio::test]
+    async fn dataset_reads_real_values_and_filters_network() {
+        let panel = test_panel("data", false);
+        tokio::fs::create_dir_all(&panel.data_dir).await.unwrap();
+        let path = panel.data_dir.join("trades.json");
+        tokio::fs::write(
+            &path,
+            serde_json::to_vec(
+                &json!([{"network":"robinhood","asset":"real-asset"},{"asset":"solana-asset"}]),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            dataset(&path, "robinhood").await["items"][0]["asset"],
+            "real-asset"
+        );
+        assert_eq!(
+            dataset(&path, "solana").await["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            dataset(&path, "elysium").await["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+    #[test]
+    fn generated_token_is_persistent_and_private() {
+        if std::env::var_os("PANEL_AUTH_TOKEN").is_some() {
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("girasol-panel-token-{}", rand::random::<u64>()));
+        let token = local_token(&dir).unwrap();
+        assert_eq!(token.len(), 64);
+        assert_eq!(local_token(&dir).unwrap(), token);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.join("panel-auth-token"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert!(!render_index().contains(&token));
+    }
 
     #[test]
     fn test_constant_time_eq() {
@@ -349,19 +655,28 @@ mod tests {
     }
 
     #[test]
-    fn test_render_index_contains_slots() {
+    fn dashboard_contains_networks_and_no_external_assets() {
         let html = render_index();
-        for s in API_KEY_SLOTS {
-            assert!(html.contains(s.id), "index missing slot {}", s.id);
-            assert!(html.contains(s.label));
+        for value in [
+            "solana",
+            "robinhood",
+            "elysium",
+            "Positions",
+            "Telegram",
+            "Bearer ",
+            "Underworld",
+        ] {
+            assert!(html.contains(value), "missing {}", value);
         }
-        assert!(html.contains("tips-friendly"));
-        assert!(html.contains("Bearer "));
+        assert!(!html.contains("<script src="));
     }
 
     #[test]
     fn test_find_subsequence() {
-        assert_eq!(find_subsequence(b"hello\r\n\r\nworld", b"\r\n\r\n"), Some(5));
+        assert_eq!(
+            find_subsequence(b"hello\r\n\r\nworld", b"\r\n\r\n"),
+            Some(5)
+        );
         assert_eq!(find_subsequence(b"abc", b"zz"), None);
     }
 
@@ -369,17 +684,42 @@ mod tests {
     async fn test_route_unauthorized() {
         let dir = std::env::temp_dir().join(format!("girasol-panel-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let panel = KeyPanel { vault: Arc::new(ApiKeyVault::new(dir)), auth_token: "secret-token-1".into() };
-        let req = Request { method: "GET".into(), path: "/api/panel/keys".into(), auth: None, body: vec![] };
+        let panel = KeyPanel {
+            vault: Arc::new(ApiKeyVault::new(dir)),
+            auth_token: "secret-token-1".into(),
+            data_dir: std::env::temp_dir(),
+            runtime: Arc::new(crate::runtime::RuntimeState::new(false)),
+        };
+        let req = Request {
+            method: "GET".into(),
+            path: "/api/panel/keys".into(),
+            auth: None,
+            body: vec![],
+        };
         let (status, _, _) = panel.route(&req).await;
         assert_eq!(status, 401);
-        let req = Request { method: "GET".into(), path: "/api/panel/keys".into(), auth: Some("Bearer wrong".into()), body: vec![] };
+        let req = Request {
+            method: "GET".into(),
+            path: "/api/panel/keys".into(),
+            auth: Some("Bearer wrong".into()),
+            body: vec![],
+        };
         let (status, _, _) = panel.route(&req).await;
         assert_eq!(status, 401);
-        let req = Request { method: "GET".into(), path: "/api/panel/keys".into(), auth: Some("Bearer secret-token-1".into()), body: vec![] };
+        let req = Request {
+            method: "GET".into(),
+            path: "/api/panel/keys".into(),
+            auth: Some("Bearer secret-token-1".into()),
+            body: vec![],
+        };
         let (status, _, _) = panel.route(&req).await;
         assert_eq!(status, 200);
-        let req = Request { method: "GET".into(), path: "/".into(), auth: None, body: vec![] };
+        let req = Request {
+            method: "GET".into(),
+            path: "/".into(),
+            auth: None,
+            body: vec![],
+        };
         let (status, _, _) = panel.route(&req).await;
         assert_eq!(status, 200);
     }
