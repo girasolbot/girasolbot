@@ -17,14 +17,14 @@ price_cache_ttl_secs = 60
 # "shreds" (default, fastest), "websocket", or "geyser"
 listener_mode = "shreds"
 
-# ── API-key panel (optional) ──
-# Enabled only when PANEL_AUTH_TOKEN env var is set (min 8 chars).
+# ── Dashboard (always started) ──
+# Auto-generates data/panel-auth-token (0600); optional PANEL_AUTH_TOKEN min 16 chars.
 # Bind address: SNIPER_PANEL_BIND (default 127.0.0.1:8078, loopback only).
 # Vault file: SNIPER_DATA_DIR/apikeys.enc.json (AES-256-GCM at rest).
 # Keys set via the panel take precedence over values in this file.
 
 # ── Dry-run safety ──
-# Set to false only when you are ready for real trades.
+# Live requires --real AND fresh authenticated panel confirmation; this alone cannot enable live.
 dry_run = true
 
 # ── Take-profit & stop-loss levels ──

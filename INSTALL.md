@@ -4,7 +4,7 @@
 
 | Tool | Required | Notes |
 |------|----------|-------|
-| Rust (stable) | yes | 1.75+; `rustup` is the easiest installer |
+| Rust (stable) | yes | validated on 1.96; `rustup` is the easiest installer |
 | Solana CLI | optional | handy for keypair generation (`solana-keygen`) |
 | git | yes | to clone the repository |
 
@@ -26,7 +26,7 @@ cargo build --release
 ```
 
 > A vendored OpenSSL is used, so no system OpenSSL headers are needed.
-> First build takes a few minutes.
+> First-build time depends on CPU, memory and disk; Solana dependencies can take tens of minutes.
 
 ## 3. Create your configuration
 
@@ -90,28 +90,28 @@ swqos_jito_url    = "https://<region>.mainnet.block-engine.jito.wtf"
 The panel is a small web UI + REST API built into the bot. It stores every
 key in an encrypted local vault instead of plaintext config.
 
-**Enable it** by setting a panel auth token before starting the bot:
+The panel starts automatically. You may set a token before starting the bot:
 
 ```bash
-export PANEL_AUTH_TOKEN="a-long-random-string"   # min 8 chars
+export PANEL_AUTH_TOKEN="a-long-random-string"   # min 16 chars
 export SNIPER_PANEL_BIND="127.0.0.1:8078"        # optional, this is the default
 export SNIPER_DATA_DIR="data"                    # optional, default ./data
 cargo run --release
 ```
 
-If `PANEL_AUTH_TOKEN` is unset the panel stays off — the bot runs as usual.
+If `PANEL_AUTH_TOKEN` is unset, a random token is saved locally to `data/panel-auth-token` with mode 0600. Read that file locally to unlock the page. `cargo run --release -- --panel-only` starts the dashboard without trading config.
 
 **What you get**
 
 - Web UI at `http://127.0.0.1:8078/` — paste the token, then view/update
-  keys for all 11 provider slots (RPC HTTP/WSS, ERPC, Geyser, ShredStream,
-  Jito, bloXroute, NextBlock, ZeroSlot, Nozomi, Helius). tips/free-friendly
-  providers are listed first.
+  RPC/tip endpoints, signing keys, provider slots, LLM and Telegram
+  settings across three networks. Storing a provider slot alone does not
+  activate that provider; engine configuration must enable its transport.
 - REST API (same token, `Authorization: Bearer <PANEL_AUTH_TOKEN>`):
 
 ```
 GET    /api/panel/keys          # masked status for all slots
-POST   /api/panel/keys/{slot}   # body {"value": "<key>"}; empty value deletes
+POST   /api/panel/keys/{slot}   # body {"value": "<key>"}; non-empty string required; use DELETE to remove
 DELETE /api/panel/keys/{slot}   # delete stored key
 GET    /api/panel/health        # vault file health
 ```
@@ -124,8 +124,10 @@ GET    /api/panel/health        # vault file health
   random per-installation secret in `data/.apikeys-secret` (0600).
 - Reading a key through the panel always shows a masked form (`ab…cd90`);
   plaintext never leaves the vault except inside the bot process.
-- Panel keys take precedence over the same field in `config.toml`; if
-  nothing is stored, the config value (or the slot's env var) is used.
+- Startup overrides are wired for Solana RPC HTTP/WSS, Jito/tip RPC,
+  bloXroute/NextBlock and the vaulted wallet, plus EVM RPC/tip/signing.
+  Other provider catalog entries retain their existing config integration.
+  Restart the engine after changing transport/signing settings.
 
 ## 6. Run
 
@@ -133,7 +135,7 @@ GET    /api/panel/health        # vault file health
 # dry-run (default — no real transactions)
 cargo run --release
 
-# real mode — requires a wallet keypair in config and dry_run=false or --real
+# real mode — vaulted solana-wallet key + --real + fresh panel confirmation
 cargo run --release -- --real
 ```
 
@@ -147,7 +149,8 @@ configured. Stop with `Ctrl+C` — a session statistics summary is printed
    `TIMING detect/buy` logs and the statistics summary.
 2. Verify your endpoint latencies (the bot logs per-provider timings).
 3. Start real mode with a **small** `buy_amount` and low max positions.
-4. Keep `positions.json` backed up — it is how positions survive a restart.
+4. Keep `$SNIPER_DATA_DIR/positions.json` backed up for live holdings;
+   paper holdings use `positions.paper.json` in the same directory.
 
 ## 8. Troubleshooting
 
@@ -158,15 +161,16 @@ configured. Stop with `Ctrl+C` — a session statistics summary is printed
 | `Shreds listener fatal error` | shred endpoint unreachable/unsupported — switch `listener_mode` to `geyser` or `websocket` |
 | Buys skipped: duplicate | the same signature was seen twice (multi-listener dedup working as intended) |
 | Panel returns 401 | missing/wrong `Authorization: Bearer` header |
-| Panel disabled | `PANEL_AUTH_TOKEN` not set (this is the default) |
+| Panel authentication | Read `data/panel-auth-token`, or set `PANEL_AUTH_TOKEN` (16+ characters) |
 
 ## 9. Security checklist
 
 - `config.toml` holds secrets in plaintext — keep it out of git (already
   gitignored) and out of backups you share.
 - Prefer the panel vault for long-lived keys; rotate `VAULT_PASSPHRASE`
-  deliberately (rotating it makes previously stored keys unreadable —
-  re-enter them afterwards).
+  deliberately: changing it does not re-encrypt existing data. Export or
+  migrate with the original passphrase first; unreadable existing entries
+  block writes to prevent key loss.
 - Keep `SNIPER_PANEL_BIND` on a loopback/private interface; do not expose
   the panel to the public internet.
 - The wallet keypair controls real funds. Use a dedicated hot wallet with a

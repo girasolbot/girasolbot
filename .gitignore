@@ -8,6 +8,7 @@ logs/
 # Runtime / private data — NEVER commit
 config.toml
 positions.json
+positions.paper.json
 data/
 *.pem
 *.tar
@@ -27,3 +28,5 @@ data/.apikeys-secret
 .DS_Store
 Thumbs.db
 .cargo-home/
+
+__pycache__/

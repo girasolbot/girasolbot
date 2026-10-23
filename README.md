@@ -1,6 +1,6 @@
 # <img src="docs/emblem.png" alt="🌻" width="42" align="top"> Girasol
 
-> Wallet intelligence with optional controlled copy and strategy execution.
+> Wallet intelligence, controlled copy execution and independent paper strategies.
 
 [![CI](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -11,20 +11,16 @@
 
 **🌻 $GIRASOL is LIVE** — [**BUY GIRASOL**](https://pump.fun/coin/7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump) · Solana contract (click-to-copy on the website): `7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump`
 
-## 🗓️ Roadmap — chain support
+## Chain support
 
-| Chain | Status |
+| Chain | Public Rust implementation |
 |---|---|
-| Solana | ✅ live in this repository |
-| EVM (Robinhood Chain, 0x routing) | ✅ live in the TS bot |
-| **Elysium** | 🗓️ **October 20, 2026** — in-bot support ships on this date |
-| BNB Chain | 🕒 coming soon |
-| Arc | 🕒 coming soon |
+| Solana | Existing supported DEX mirror/replay and risk controls |
+| Robinhood | Nitro feed / pending WS / RPC observation, exact-calldata replay with RPC simulation and gated signing |
+| Elysium | Same EVM engine, HYPE testnet configuration (`99801`), observed launchpad contracts |
+| Elysium mainnet | Configuration template for operator-verified chain ID/endpoints; November 9 launch metadata must be verified before activation |
 
-> Dates for chains marked "coming soon" are announced here and on
-> [@girasolbot](https://x.com/girasolbot) as soon as they are fixed. Elysium
-> support is on the release track; both remaining chains are already in
-> integration work.
+RPC simulation uses `eth_call` and `eth_estimateGas`. Local `revm` execution is not included. Exact calldata may contain the original recipient or require approvals; a successful simulation does not guarantee an equivalent economic result. Unsupported envelopes fail closed.
 
 Dependency advisories and explicitly deferred upstream migrations are tracked in [Security advisories](docs/SECURITY_ADVISORIES.md).
 
@@ -42,6 +38,33 @@ Same-block execution is an engineering objective affected by network conditions,
 - ⚡ low-latency execution pipeline
 
 ---
+
+## Local dashboard, research and Telegram
+
+```bash
+cargo run --release -- --panel-only
+```
+
+Open `http://127.0.0.1:8078`, read the generated bearer token from `data/panel-auth-token` locally, and unlock the API in the page. `cargo run` also starts the dashboard when no trading configuration exists. The dashboard runs concurrently with configured trading engines. `SNIPER_DATA_DIR` and `SNIPER_PANEL_BIND` override the local paths/bind; set `VAULT_PASSPHRASE` for passphrase-backed encryption.
+
+![Actual local dashboard with empty account data](docs/images/dashboard.png)
+
+Choose **Solana / Robinhood / Elysium** for separate RPC and tip endpoint settings, positions, trade history and logs. Wallet signing keys, provider keys, LLM keys and Telegram credentials are stored in the encrypted vault. Changes to execution endpoints/signing keys require an engine restart. Research reads the current vault settings.
+
+- **Full copy:** Solana supported-swap mirror/replay; EVM original destination/value/calldata with own signer and nonce, simulation and explicit limits. This cannot guarantee arbitrary target transactions succeed from another wallet.
+- **Strategy research:** load a target's bounded real history (days/weeks), inspect timing, observed routes, conservative matched round trips, post-loss behaviour and coverage confidence. Generate a paper strategy; independent native-quoted market observations drive entries and TP/SL rather than copying each target transaction. Paper results exclude market impact, fees and slippage.
+- **Underworld:** observed transfer counterparties and routes, probable relationships, and optional operator-provided exchange labels. Relationships do not establish common ownership.
+- **Daily refresh:** saved targets are re-analyzed and ranked by evidence confidence and observed failure rate. Confidence measures evidence coverage, not investment success.
+- **LLM:** local deterministic research works without a key. Optional OpenAI, Anthropic, DeepSeek, GLM and Qwen use your own vaulted keys. A free, unauthenticated DeepSeek V4 service has not been verified and is not advertised as available.
+- **Telegram:** save `telegram-bot-token` and `telegram-chat-id` in the panel. The assistant polls only when configured and responds only to allowlisted chats. `/status`, `/profile NETWORK ADDRESS DAYS`, `/strategy`, `/paper`, `/underworld`, `/ask` support research and paper trading. Live activation stays in the authenticated panel.
+
+For EVM, copy the appropriate [configuration](configs/evm.robinhood.toml), set target/copy addresses and limits, then run:
+
+```bash
+cargo run --release -- --evm-config configs/evm.robinhood.toml
+```
+
+Elysium needs an operator-supplied RPC endpoint; see [testnet](configs/evm.elysium.toml) and [mainnet preparation](configs/evm.elysium-mainnet.toml). Never substitute an unknown mainnet ID or a testnet contract address. See [v3 operations](docs/V3_OPERATIONS.md) for APIs, data coverage and limits.
 
 ## How it works
 
@@ -108,8 +131,9 @@ same `data/apikeys.enc.json` in the unified **vault v2** format:
 - One file (`<DATA_DIR>/apikeys.enc.json`), one
   [`VAULT_PASSPHRASE`](INSTALL.md#api-key-panel) env var for both bots.
   Run both bots with the same `VAULT_PASSPHRASE`, or neither — otherwise
-  the other bot's keys become undecryptable (they are skipped safely and
-  re-encrypted on the next write with a valid passphrase).
+  the other bot's keys become undecryptable. This Rust implementation refuses
+  migration/writes when existing entries cannot be decrypted; restore the
+  original passphrase before changing the vault.
 - AES-256-GCM per slot; the AES key is `scrypt(passphrase, salt, 32)` with
   `N=16384, r=8, p=1` (identical in Rust and TS implementations).
 - Legacy **v1** files (the old per-slot-salt Rust layout and the old
@@ -163,7 +187,11 @@ src/
   raydium_v4.rs / raydium_cpmm.rs / pumpswap.rs   DEX execution
   position_monitor.rs TP/SL + persistence
   api_key_vault.rs    encrypted API-key vault (AES-256-GCM)
-  key_panel.rs        API-key management panel (REST + web UI)
+  key_panel.rs / panel.html   authenticated dashboard and provider settings
+  runtime.rs          shared live gate and local event journal
+  evm.rs / evm_tx.rs   EVM listeners, simulation, envelopes and signing
+  intelligence.rs     observed history, profiles and paper strategies
+  telegram.rs         allowlisted research assistant
 proto/                ShredStream / shared proto definitions (reference)
 idl/                  PumpFun IDL files
 config.example.toml   example configuration (placeholders only)
@@ -171,7 +199,7 @@ config.example.toml   example configuration (placeholders only)
 
 ## Requirements
 
-- Rust 1.75+ (stable)
+- Rust stable (validated with Rust 1.96)
 - A Solana RPC endpoint (free public RPC works; low-latency providers are
   better — see [INSTALL.md](INSTALL.md#where-to-get-keys))
 - Optional: ShredStream / Geyser access for the fastest detection paths
@@ -190,8 +218,7 @@ panel, and safe real-mode steps — are in [INSTALL.md](INSTALL.md).
 
 ## Safety
 
-- `dry_run = true` by default. Real submissions require `dry_run = false`
-  in `config.toml` or the `--real` flag **and** a loaded wallet keypair.
+- `dry_run = true` by default. Real submissions require `--real`, a vaulted wallet key and a fresh authenticated panel confirmation (`I UNDERSTAND REAL FUNDS ARE AT RISK`). Setting Solana `dry_run=false` alone does not enable live. EVM additionally requires its explicit live configuration and calldata acknowledgement.
 - `config.toml`, `positions.json` and the `data/` vault directory are
   gitignored — never commit them.
 - No key material is ever logged or returned by the panel in plaintext.
