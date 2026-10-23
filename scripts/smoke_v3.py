@@ -20,6 +20,7 @@ def main():
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         env = dict(os.environ, SNIPER_DATA_DIR=str(root / "data"),
+                   SNIPER_CONFIG=str(root / "absent-config.toml"),
                    SNIPER_PANEL_BIND=f"127.0.0.1:{port}",
                    PANEL_AUTH_TOKEN="isolated-smoke-token-no-production-secret")
         # Avoid inheriting operator credentials into this isolated process.
