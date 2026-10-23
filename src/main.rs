@@ -1796,3 +1796,16 @@ fn log_settings_diff(old: &Settings, new: &Settings) {
 fn endpoint_origin(value: &str) -> String {
     url::Url::parse(value).map(|u|u.origin().ascii_serialization()).unwrap_or_else(|_|"[configured endpoint]".into())
 }
+
+mod live_strategy;
+
+/// OpenAI-compatible CliproxyAPI base URL (default on loopback, like the
+/// ElizaOS contour). `GIRASOL_LLM_BASE_URL` overrides, e.g. the LAN address.
+pub fn llm_base_url() -> String {
+    std::env::var("GIRASOL_LLM_BASE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8317/v1".to_string())
+}
+/// OpenAI-compatible chat endpoint on the CliproxyAPI base.
+pub fn llm_chat_url() -> String {
+    format!("{}/chat/completions", llm_base_url().trim_end_matches('/'))
+}

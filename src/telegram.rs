@@ -68,7 +68,7 @@ async fn command(
                 text
             };
             let mut provider = "local".to_owned();
-            for name in ["deepseek", "openai", "anthropic", "glm", "qwen"] {
+            for name in ["gemini", "deepseek", "openai", "anthropic", "glm", "qwen"] {
                 if vault.get_api_key(&format!("llm-{name}")).await.is_some() {
                     provider = name.to_owned();
                     break;

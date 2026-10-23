@@ -172,7 +172,7 @@ fn synthesize(p: &Value) -> Value {
     };
     json!({"mode":"strategy","dry_run":true,"target":p["target"],"network":p["network"],"confidence":confidence,"evidence_transactions":sample,"matched_exits":p["matched_exits"],"paper_size_native":number(&p["median_outflow_native"]).min(0.1),"entry_drop_fraction":stop.min(0.05),"take_profit_fraction":take,"stop_loss_fraction":stop,"median_interval_seconds":p["median_interval_seconds"],"refreshed_at":now(),"next_refresh_at":now()+86400,"parameters_basis":if enough{"exit thresholds from observed matched roundtrip returns; entry pullback remains a paper hypothesis"}else{"observed median size and timing; entry/exit thresholds are conservative paper hypotheses, not inferred profitable alpha"},"live_enabled":false})
 }
-fn decide(strategy: &Value, price: f64, last_price: Option<f64>) -> Value {
+pub(crate) fn decide(strategy: &Value, price: f64, last_price: Option<f64>) -> Value {
     let action = if price.is_finite()
         && price > 0.
         && last_price
@@ -699,19 +699,20 @@ pub async fn chat(body: &Value, context: &Value, vault: &ApiKeyVault) -> Result<
         return Err("message must contain 1..12000 bytes".into());
     }
     let provider = body["provider"].as_str().unwrap_or("local");
-    let (url, model) = match provider {
-        "openai" => ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
+    let (url, model): (String, _) = match provider {
+        "openai" => ("https://api.openai.com/v1/chat/completions".to_owned(), "gpt-4o-mini"),
         "anthropic" => (
-            "https://api.anthropic.com/v1/messages",
+            "https://api.anthropic.com/v1/messages".to_owned(),
             "claude-sonnet-4-20250514",
         ),
-        "deepseek" => ("https://api.deepseek.com/chat/completions", "deepseek-chat"),
+        "deepseek" => (crate::llm_chat_url(), "deepseek-v4-pro"),
+        "gemini" => (crate::llm_chat_url(), "gemini-3.8-flash-high"),
         "glm" => (
-            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions".to_owned(),
             "glm-4-flash",
         ),
         "qwen" => (
-            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions".to_owned(),
             "qwen-turbo",
         ),
         "local" => {
@@ -1049,5 +1050,65 @@ mod tests {
         .unwrap_err();
         assert_eq!(error, "getTransaction: RPC returned an error");
         server.await.unwrap();
+    }
+
+    // --- CliproxyAPI provider routing (task: gemini/deepseek via local proxy) ---
+
+    #[tokio::test]
+    async fn chat_gemini_via_cliproxy_mocked() {
+        // Mock OpenAI-compatible Cliproxy endpoint on loopback.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0u8; 8192];
+            let n = stream.read(&mut bytes).await.unwrap();
+            let request = String::from_utf8_lossy(&bytes[..n]).to_string();
+            let captured = tokio::sync::Mutex::new(request);
+            let body = r#"{"choices":[{"message":{"content":"cliproxy-gemini-reply"}}]}"#;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(reply.as_bytes()).await.unwrap();
+            captured
+        });
+        let temp = std::env::temp_dir().join(format!("girasol-chat-mock-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let vault = crate::api_key_vault::ApiKeyVault::new(temp);
+        vault.set_api_key("llm-gemini", "test-key").await.unwrap();
+        // Point the provider at the mock server.
+        std::env::set_var("GIRASOL_LLM_BASE_URL", format!("http://{addr}/v1"));
+        let response = chat(
+            &json!({"message":"hello","provider":"gemini"}),
+            &json!({}),
+            &vault,
+        )
+        .await
+        .unwrap();
+        std::env::remove_var("GIRASOL_LLM_BASE_URL");
+        assert_eq!(response["provider"], "gemini");
+        assert_eq!(response["answer"], "cliproxy-gemini-reply");
+        assert_eq!(response["model"], "gemini-3.8-flash-high");
+        let request = server.await.unwrap().lock().await.clone();
+        assert!(request.contains("/v1/chat/completions"), "must hit cliproxy path");
+        assert!(request.contains("gemini-3.8-flash-high"));
+        assert!(request.contains("Bearer test-key"));
+    }
+
+    #[test]
+    fn llm_base_url_defaults_to_cliproxy_and_env_overrides() {
+        let mut value = None;
+        // default
+        std::env::remove_var("GIRASOL_LLM_BASE_URL");
+        value = Some(crate::llm_chat_url());
+        assert_eq!(value.as_deref(), Some("http://127.0.0.1:8317/v1/chat/completions"));
+        // env override accepted
+        std::env::set_var("GIRASOL_LLM_BASE_URL", "http://192.168.1.87:8317/v1");
+        let override_url = crate::llm_chat_url();
+        std::env::remove_var("GIRASOL_LLM_BASE_URL");
+        assert_eq!(override_url, "http://192.168.1.87:8317/v1/chat/completions");
     }
 }
