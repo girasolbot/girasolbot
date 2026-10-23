@@ -1,0 +1,20 @@
+# Verified 2026-10-23: reference GET /readyz reports chainId 99801.
+# https://cars-nasa-thomas-absent.trycloudflare.com
+# GET /launch/options identifies gas HYPE and native wrapper:
+# 0xCD57F65c2B0e5881CFC2E609F7CD53b746E1F234
+# app.js verified route: "single on-chain Elysium curve".
+# The reference does not disclose its RPC/WS URLs or full deployed router map.
+# Supply verified endpoints; the launchpad HTTP origin IS NOT an Ethereum RPC.
+chain = "elysium"
+chain_id = 99801
+rpc_url = ""
+ws_url = ""
+sequencer_feed = false
+dry_run = true
+targets = []
+copy_address = "0x0000000000000000000000000000000000000000"
+max_value_wei = "0"
+max_gas = 500000
+max_fee_per_gas_wei = "10000000000"
+allow_unmodified_calldata = false
+poll_interval_ms = 1000

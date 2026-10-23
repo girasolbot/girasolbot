@@ -81,3 +81,7 @@ rand = "0.8"
 arc-swap = "1"
 notify = { version = "8", features = ["macos_fsevent"] }
 prost-types = "0.13"
+
+# EVM signed-envelope recovery and local signing (already in Solana dependency graph).
+libsecp256k1 = "0.6"
+sha3 = "0.10"

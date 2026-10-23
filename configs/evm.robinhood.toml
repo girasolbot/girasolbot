@@ -1,0 +1,23 @@
+# Robinhood Chain public testnet; set your own RPC endpoint if this public one is unavailable.
+chain = "robinhood"
+chain_id = 46630
+rpc_url = "https://rpc.testnet.chain.robinhood.com"
+# Mainnet feed from the local Robinhood research plan (availability not guaranteed).
+# Switch chain_id/RPC together to 4663 before enabling that feed.
+# ws_url = "wss://feed.mainnet.chain.robinhood.com"
+# sequencer_feed = true
+ws_url = ""
+sequencer_feed = false
+dry_run = true
+targets = []
+# Required: replace with YOUR public copying wallet. Paper mode needs no key.
+copy_address = "0x0000000000000000000000000000000000000000"
+max_value_wei = "0"
+max_gas = 500000
+max_fee_per_gas_wei = "10000000000"
+allow_unmodified_calldata = false
+poll_interval_ms = 1000
+# Known deployed destinations from /home/gera/robinhood-rh-chain/PLAN.md:
+# SwapRouter02 0xCaf681a66D020601342297493863E78C959E5cb2
+# NOXA Factory 0xD9eC2db5f3D1b236843925949fe5bd8a3836FCcB
+# Destination filtering is deliberately absent: every supported user tx from a target is observed.

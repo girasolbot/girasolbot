@@ -1,0 +1,17 @@
+# Mainnet preparation for the announced November 9, 2026 launch.
+# No mainnet chain ID or endpoints have been verified: zeros/blanks fail closed.
+# Fill authoritative metadata, set allow_new_chain=true, then verify RPC eth_chainId.
+chain = "elysium"
+chain_id = 0
+allow_new_chain = false
+rpc_url = ""
+ws_url = ""
+sequencer_feed = false
+dry_run = true
+targets = []
+copy_address = "0x0000000000000000000000000000000000000000"
+max_value_wei = "0"
+max_gas = 500000
+max_fee_per_gas_wei = "10000000000"
+allow_unmodified_calldata = false
+poll_interval_ms = 1000
