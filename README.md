@@ -17,7 +17,7 @@
 |---|---|
 | Solana | ✅ live in this repository |
 | EVM (Robinhood Chain, 0x routing) | ✅ live in the TS bot |
-| **Elysium** | 🗓️ **October 20, 2026** — in-bot support ships on this date |
+| **Elysium** | 🗓️ **November 9, 2026** — in-bot support ships on this date |
 | BNB Chain | 🕒 coming soon |
 | Arc | 🕒 coming soon |
 
