@@ -83,9 +83,8 @@ Elysium needs an operator-supplied RPC endpoint; see [testnet](configs/evm.elysi
         buy executor ── blockhash cache (400ms refresh)
                │            leader cache, buy template (pre-built)
                ▼
-        swqos_sender.rs — concurrent fan-out to all configured
-        providers (Jito, bloXroute, NextBlock, ZeroSlot, Nozomi,
-        Helius…), first submission wins, losers aborted
+        helius_sender.rs — transaction submission via Helius RPC
+        (compute budget, tips, signing, send)
                ▼
         position_monitor.rs — TP/SL levels, mirror sells,
         positions.json persistence, duplicate protection
@@ -98,9 +97,8 @@ Elysium needs an operator-supplied RPC endpoint; see [testnet](configs/evm.elysi
   parallel, first detection wins, duplicate signatures deduped.
 - **Pre-built transaction templates** — all mint-independent values are
   computed once at startup; per-trade work is a local PDA derivation.
-- **Concurrent SWQoS submission** — one signed transaction fanned out to
-  every configured provider simultaneously; losing provider tasks are
-  aborted after the first success.
+- **Fast submission** — pre-signed transactions sent directly over Helius
+  RPC with pre-computed tips; blockhash cache keeps per-trade work minimal.
 - **DEX support** — PumpFun, PumpSwap, Raydium V4, Raydium CPMM (buy + sell).
 - **Risk management** — multi-level TP/SL, mirror sells, duplicate-buy
   protection, max-positions enforcement, position persistence.
@@ -150,11 +148,6 @@ Slot catalog (every slot carries a `network` field: `evm`, `solana` or
 | `erpc` | solana | low-latency edge RPC / WSS |
 | `geyser` | solana | Yellowstone gRPC stream |
 | `shreds` | solana | ShredStream |
-| `jito` | solana | SWQoS block engine |
-| `bloxroute` | solana | QUIC/HTTP SWQoS |
-| `nextblock` | solana | QUIC SWQoS |
-| `zeroslot` | solana | SWQoS |
-| `nozomi` | solana | SWQoS (Temporal) |
 | `zerox` | evm | 0x swap quotes (TS bot) |
 | `dexscreener` | evm | token metadata (TS bot) |
 | `coingecko` | evm | price/metadata (TS bot) |
@@ -162,7 +155,7 @@ Slot catalog (every slot carries a `network` field: `evm`, `solana` or
 | `quicknode` | evm | dedicated RPC (TS bot) |
 | `infura` | evm | backup RPC (TS bot) |
 | `explorer` | evm | Blockscout API (TS bot) |
-| `helius` | **both** | sender/SWQoS + enhanced RPC — one shared slot |
+| `helius` | **both** | transaction sender + enhanced RPC — one shared slot |
 
 Cross-bot round-trip is covered by a fixed test vector
 (passphrase `roundtrip-test-1234`, slot `alchemy`, value `sk-test-vector-00`):
@@ -180,7 +173,7 @@ src/
   ws_listener.rs      logsSubscribe WebSocket listener
   copy_engine.rs      target-wallet detection + DEX parsing
   buyer.rs / tx_template.rs / tx_builder.rs   buy path
-  swqos_sender.rs     concurrent provider fan-out
+  helius_sender.rs    transaction submission (RPC)
   helius_sender.rs    single-provider submission, tips, CU pricing
   quic_sender.rs      bloXroute (mTLS QUIC) + NextBlock (QUIC) senders
   rpc.rs              price/liquidity fetch, sell flow
@@ -228,7 +221,7 @@ panel, and safe real-mode steps — are in [INSTALL.md](INSTALL.md).
 This software is provided for research and educational purposes, "AS IS",
 without warranty of any kind. Trading crypto assets is risky; you can lose
 your entire deposit. You are solely responsible for complying with the laws
-of your jurisdiction and with the terms of service of any RPC or SWQoS
+of your jurisdiction and with the terms of service of any RPC
 provider you use. Nothing in this repository is financial advice, and no
 statement here is a promise of performance or profit.
 

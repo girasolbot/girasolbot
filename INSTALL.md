@@ -72,7 +72,7 @@ Two ways to provide them:
 
 **tips-friendly** = the provider is paid per-transaction tips rather than a
 fixed subscription; you only pay when your transactions land. These are the
-cheapest way to start with SWQoS submission and are highlighted in the panel.
+cheapest way to start and are highlighted in the panel.
 
 Keys are placed in these config fields (all optional):
 
@@ -82,7 +82,6 @@ bloxroute_api_key = "..."
 nextblock_api_key = "..."
 zeroslot_api_key  = "..."
 nozomi_api_key    = "..."
-swqos_jito_url    = "https://<region>.mainnet.block-engine.jito.wtf"
 ```
 
 ## 5. API-key panel
