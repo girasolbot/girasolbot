@@ -22,7 +22,8 @@ readme = (ROOT / "README.md").read_text()
 for marker in [
     "https://girasolbot.com",
     "https://x.com/girasolbot",
-    "No official Girasol token exists yet",
+    "Any other contract claiming to be Girasol is fraudulent",
+    "7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump",
     "not a guarantee",
     "docs/PRODUCT_STATUS.md",
 ]:
