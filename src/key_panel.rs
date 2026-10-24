@@ -19,6 +19,8 @@ pub struct KeyPanel {
     auth_token: String,
     data_dir: PathBuf,
     runtime: Arc<crate::runtime::RuntimeState>,
+    strategy_engines:
+        tokio::sync::Mutex<std::collections::BTreeMap<String, crate::live_strategy::LiveEngine>>,
 }
 
 fn local_token(data_dir: &Path) -> Result<String, String> {
@@ -82,6 +84,7 @@ pub async fn start_panel(
         data_dir,
         auth_token,
         runtime,
+        strategy_engines: Default::default(),
     });
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
@@ -105,6 +108,7 @@ pub async fn start_panel(
     }
 }
 
+#[derive(Clone)]
 struct Request {
     method: String,
     path: String,
@@ -276,6 +280,12 @@ impl KeyPanel {
         } else {
             Value::Null
         };
+        if path == "/api/panel/strategy" || path.starts_with("/api/panel/strategy/") {
+            return match self.strategy_route(&req.method, path, network, &body).await {
+                Ok(value) => json_response(200, value),
+                Err(error) => json_response(400, json!({"error":error,"dry_run":true})),
+            };
+        }
         let result = match (req.method.as_str(), path) {
             ("GET", "/api/panel/keys") => json!({"keys":self.vault.statuses().await}),
             ("GET", "/api/panel/health") => self.vault.vault_health(),
@@ -475,6 +485,7 @@ mod tests {
             auth_token: "secret-token-1".into(),
             data_dir: std::env::temp_dir(),
             runtime: Arc::new(crate::runtime::RuntimeState::new(false)),
+            strategy_engines: Default::default(),
         };
         panel
             .vault
@@ -504,6 +515,7 @@ mod tests {
             auth_token: "test-bearer-token".into(),
             data_dir: dir,
             runtime: Arc::new(crate::runtime::RuntimeState::new(allow_live)),
+            strategy_engines: Default::default(),
         })
     }
     async fn http(panel: Arc<KeyPanel>, raw: &[u8]) -> String {
@@ -689,6 +701,7 @@ mod tests {
             auth_token: "secret-token-1".into(),
             data_dir: std::env::temp_dir(),
             runtime: Arc::new(crate::runtime::RuntimeState::new(false)),
+            strategy_engines: Default::default(),
         };
         let req = Request {
             method: "GET".into(),
@@ -722,5 +735,256 @@ mod tests {
         };
         let (status, _, _) = panel.route(&req).await;
         assert_eq!(status, 200);
+    }
+    #[tokio::test]
+    async fn strategy_dry_run_routes_require_auth_and_never_enable_live() {
+        let panel = test_panel("strategy-r2", false);
+        let raw = b"GET /api/panel/strategy?network=solana HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        assert!(http(panel.clone(), raw).await.starts_with("HTTP/1.1 401"));
+        let req = Request {
+            method: "GET".into(),
+            path: "/api/panel/strategy?network=solana".into(),
+            auth: Some("Bearer test-bearer-token".into()),
+            body: vec![],
+        };
+        let response = panel.route(&req).await;
+        assert_eq!(response.0, 200, "strategy status route must be installed");
+        let status: Value = serde_json::from_slice(&response.2).unwrap();
+        assert_eq!(status["mode"], "dry-run");
+        assert_eq!(status["enabled"], false);
+        let enable = Request {
+            method: "POST".into(),
+            path: "/api/panel/strategy/enabled?network=solana".into(),
+            auth: req.auth.clone(),
+            body: br#"{"enabled":true}"#.to_vec(),
+        };
+        assert_eq!(panel.route(&enable).await.0, 200);
+        assert!(!panel.runtime.live_enabled());
+        let kill = Request {
+            path: "/api/panel/strategy/kill?network=solana".into(),
+            body: b"{}".to_vec(),
+            ..enable.clone()
+        };
+        assert_eq!(panel.route(&kill).await.0, 200);
+        assert_eq!(panel.route(&enable).await.0, 400, "kill is sticky");
+    }
+}
+
+impl KeyPanel {
+    async fn strategy_route(
+        &self,
+        method: &str,
+        path: &str,
+        network: &str,
+        body: &Value,
+    ) -> Result<Value, String> {
+        use crate::live_strategy::LiveEngine;
+        if !matches!(network, "solana" | "robinhood") {
+            return Err("r2 strategy supports Solana/Robinhood only; Elysium is unchanged".into());
+        }
+        if !matches!(
+            (method, path),
+            ("GET", "/api/panel/strategy")
+                | ("POST", "/api/panel/strategy/configure")
+                | ("POST", "/api/panel/strategy/enabled")
+                | ("POST", "/api/panel/strategy/kill")
+                | ("POST", "/api/panel/strategy/tick")
+        ) {
+            return Err("unsupported strategy method or route".into());
+        }
+        let file = self.data_dir.join(format!("strategy-{network}.json"));
+        {
+            let mut engines = self.strategy_engines.lock().await;
+            if !engines.contains_key(network) {
+                engines.insert(network.into(), LiveEngine::load(&file)?);
+            }
+        }
+        if path == "/api/panel/strategy/tick" {
+            let token = body["token"].as_str().ok_or("token address required")?;
+            let token = strategy_token(network, token)?;
+            let snapshot = self
+                .strategy_engines
+                .lock()
+                .await
+                .get(network)
+                .ok_or("missing strategy engine")?
+                .clone();
+            if !snapshot.enabled || snapshot.killed {
+                return Err("strategy is OFF or killed".into());
+            }
+            let price = crate::intelligence::market_price(network, &token).await?;
+            if !price.is_finite() || price <= 0. {
+                return Err("invalid independent market quote".into());
+            }
+            let observed_at = chrono::Utc::now().timestamp();
+            let mut request = json!({"provider":"gemini", "message":
+                "Propose one independent simulated trade from the supplied market/portfolio evidence. Return ONLY JSON with action (buy/sell/hold), size_native (positive only for buy, 0 for sell/hold), and a short reason. Sell means close the existing position entirely. Do not propose changes to risk limits, asset, price, enabled state or authority. Prefer hold when evidence is insufficient. This is DRY-RUN; never claim a real transaction."});
+            if let Ok(model) = std::env::var("GIRASOL_LLM_MODEL") {
+                if !model.trim().is_empty() {
+                    request["model"] = json!(model);
+                }
+            }
+            let context = json!({"network":network,"asset":token,"price_native":price,
+                "price_source":"independent Dexscreener native-quoted pair","observed_at":observed_at,
+                "portfolio":snapshot.status()});
+            let reply = crate::intelligence::chat(&request, &context, &self.vault).await?;
+            let decision = crate::live_strategy::BrainDecision::parse(
+                reply["answer"].as_str().ok_or("LLM returned no decision")?,
+            )?;
+            let mut engines = self.strategy_engines.lock().await;
+            let engine = engines.get_mut(network).ok_or("missing strategy engine")?;
+            let result = commit_strategy_tick(
+                engine,
+                snapshot.revision,
+                &token,
+                price,
+                decision,
+                observed_at,
+                chrono::Utc::now().timestamp(),
+                &file,
+            )?;
+            return Ok(result);
+        }
+        let mut engines = self.strategy_engines.lock().await;
+        let engine = engines.get_mut(network).ok_or("missing strategy engine")?;
+        if method == "GET" {
+            return Ok(engine.status());
+        }
+        // A kill takes effect in memory even if persisting the snapshot fails.
+        if path == "/api/panel/strategy/kill" {
+            engine.kill();
+            engine.save(&file)?;
+            return Ok(engine.status());
+        }
+        let mut next = engine.clone();
+        if path == "/api/panel/strategy/configure" {
+            next.configure(body)?;
+        } else {
+            let enabled = body["enabled"].as_bool().ok_or("enabled must be boolean")?;
+            if enabled {
+                next.enable()?;
+            } else {
+                next.disable();
+            }
+        }
+        next.save(&file)?;
+        *engine = next;
+        Ok(engine.status())
+    }
+}
+
+fn strategy_token(network: &str, token: &str) -> Result<String, String> {
+    if network == "solana" {
+        use std::str::FromStr;
+        solana_sdk::pubkey::Pubkey::from_str(token).map_err(|_| "invalid Solana token address")?;
+        Ok(token.to_owned())
+    } else if network == "robinhood"
+        && token.len() == 42
+        && token.starts_with("0x")
+        && token[2..].bytes().all(|b| b.is_ascii_hexdigit())
+        && token[2..].bytes().any(|b| b != b'0')
+    {
+        Ok(token.to_ascii_lowercase())
+    } else {
+        Err("invalid strategy network or token address".into())
+    }
+}
+
+fn commit_strategy_tick(
+    engine: &mut crate::live_strategy::LiveEngine,
+    revision: u64,
+    token: &str,
+    price: f64,
+    decision: crate::live_strategy::BrainDecision,
+    observed_at: i64,
+    completed_at: i64,
+    file: &Path,
+) -> Result<Value, String> {
+    if engine.revision != revision {
+        return Err("strategy changed while awaiting model; discarded stale proposal".into());
+    }
+    if completed_at < observed_at || completed_at - observed_at > 30 {
+        return Err("market quote expired while awaiting model".into());
+    }
+    let mut next = engine.clone();
+    let status = next.observe_decision(token, price, decision, completed_at)?;
+    next.save(file)?;
+    *engine = next;
+    Ok(status)
+}
+
+#[cfg(test)]
+mod strategy_r2_tests {
+    use super::*;
+    use crate::live_strategy::{BrainDecision, LiveEngine};
+    #[test]
+    fn stale_quote_or_revoked_revision_never_changes_portfolio() {
+        let mut engine = LiveEngine::new(json!({}));
+        engine.enable().unwrap();
+        let revision = engine.revision;
+        let decision =
+            BrainDecision::parse(r#"{"action":"buy","size_native":0.01,"reason":"signal"}"#)
+                .unwrap();
+        let path = std::env::temp_dir().join(format!("girasol-r2-stale-{}", rand::random::<u64>()));
+        let before = engine.status();
+        assert!(commit_strategy_tick(
+            &mut engine,
+            revision,
+            "token",
+            1.,
+            decision.clone(),
+            1,
+            32,
+            &path
+        )
+        .is_err());
+        assert_eq!(engine.status(), before);
+        engine.kill();
+        let killed = engine.status();
+        assert!(
+            commit_strategy_tick(&mut engine, revision, "token", 1., decision, 1, 2, &path)
+                .is_err()
+        );
+        assert_eq!(engine.status(), killed);
+        assert!(!path.exists());
+    }
+    #[test]
+    fn canonical_asset_validation_and_r2_network_boundary() {
+        assert!(strategy_token("solana", "So11111111111111111111111111111111111111112").is_ok());
+        assert!(strategy_token("solana", "not a token").is_err());
+        let address = "0xABCDEF1234567890123456789012345678901234AB";
+        assert_eq!(
+            strategy_token("robinhood", address).unwrap(),
+            address.to_lowercase()
+        );
+        assert!(strategy_token("elysium", address).is_err());
+        assert!(strategy_token("robinhood", "0x0000000000000000000000000000000000000000").is_err());
+    }
+    #[test]
+    fn failed_checkpoint_leaves_previous_portfolio_intact() {
+        let mut engine = LiveEngine::new(json!({}));
+        engine.enable().unwrap();
+        let revision = engine.revision;
+        let before = engine.status();
+        let directory =
+            std::env::temp_dir().join(format!("girasol-r2-dir-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let decision =
+            BrainDecision::parse(r#"{"action":"buy","size_native":0.01,"reason":"signal"}"#)
+                .unwrap();
+        assert!(commit_strategy_tick(
+            &mut engine,
+            revision,
+            "token",
+            1.,
+            decision,
+            1,
+            2,
+            &directory
+        )
+        .is_err());
+        assert_eq!(engine.status(), before);
+        std::fs::remove_dir(&directory).unwrap();
+        let _ = std::fs::remove_file(directory.with_extension("json.tmp"));
     }
 }
