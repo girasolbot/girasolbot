@@ -1,6 +1,8 @@
 # <img src="docs/emblem.png" alt="🌻" width="42" align="top"> Girasol
 
-> 🌻 **Girasol ($GIRASOL) token launch on Solana is coming soon.** The verified contract address will be published here and at the official links below. Any other contract claiming to be Girasol is fraudulent.
+> 🌻 **Girasol ($GIRASOL) token launch on Solana is coming soon.**
+> 🌻 **Girasol ($GIRASOL) token launch on Elysium is coming soon.**
+> The verified contract addresses will be published here and at the official links below. Any other contract claiming to be Girasol is fraudulent.
 
 [![Token status](https://img.shields.io/badge/Token-SOON-FFD85A?labelColor=03110b&style=for-the-badge&logo=solana&logoColor=0b1a14)](https://girasolbot.com/token)
 [![CI](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml)
@@ -12,7 +14,7 @@
 
 | Chain | Status |
 |---|---|
-| Solana | ✅ live in this repository |
+| Solana | 🕒 token launch coming soon |
 | EVM (Robinhood Chain, 0x routing) | ✅ live in the TS bot |
 | **Elysium** | 🗓️ **November 9, 2026** — in-bot support ships on this date |
 | BNB Chain | 🕒 coming soon |
