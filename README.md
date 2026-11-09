@@ -1,12 +1,12 @@
 # <img src="docs/emblem.png" alt="🌻" width="42" align="top"> Girasol
 
-> 🌻 **Girasol ($GIRASOL) is LIVE on Solana.** The one and only verified contract: `7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump` — published here and at the official links above. Any other contract claiming to be Girasol is fraudulent.
+> 🌻 **Girasol ($GIRASOL) token launch on Solana is coming soon.** The verified contract address will be published here and at the official links below. Any other contract claiming to be Girasol is fraudulent.
 
-[![Token contract: live](https://img.shields.io/badge/CA-7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump-14F195?labelColor=03110b&style=for-the-badge&logo=solana&logoColor=0b1a14)](https://pump.fun/coin/7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump)
+[![Token status](https://img.shields.io/badge/Token-SOON-FFD85A?labelColor=03110b&style=for-the-badge&logo=solana&logoColor=0b1a14)](https://girasolbot.com/token)
 [![CI](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Official links:** [Website](https://girasolbot.com) · [X](https://x.com/girasolbot) · [Support](https://t.me/girasolsupportbot) · [Security](SECURITY.md) · [Product status](docs/PRODUCT_STATUS.md)
+**Official links:** [Website](https://girasolbot.com) · [X](https://x.com/girasoleacc) · [Support](https://t.me/girasolsupportbot) · [Security](SECURITY.md) · [Product status](docs/PRODUCT_STATUS.md)
 
 ## 🗓️ Roadmap — chain support
 
@@ -19,7 +19,7 @@
 | Arc | 🕒 coming soon |
 
 > Dates for chains marked "coming soon" are announced here and on
-> [@girasolbot](https://x.com/girasolbot) as soon as they are fixed. Elysium
+> [@girasoleacc](https://x.com/girasoleacc) as soon as they are fixed. Elysium
 > support is on the release track; both remaining chains are already in
 > integration work.
 

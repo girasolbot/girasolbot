@@ -58,4 +58,4 @@ Current dependency-audit status, including explicitly deferred Solana 2.x adviso
 
 ## Token
 
-The official Girasol token is live on Solana. Contract: `7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump` — [BUY GIRASOL](https://pump.fun/coin/7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump).
+The official Girasol token launch on Solana is coming soon. The verified contract address will be published here first. Any other contract claiming to be Girasol is fraudulent.

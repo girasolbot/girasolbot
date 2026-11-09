@@ -21,9 +21,9 @@ for relative_path in [
 readme = (ROOT / "README.md").read_text()
 for marker in [
     "https://girasolbot.com",
-    "https://x.com/girasolbot",
-    "Any other contract claiming to be Girasol is fraudulent",
-    "7twNHFHac7y4CzMfYtH6D1M1eDc72v7Czoh1sWUapump",
+    "https://x.com/girasoleacc",
+    "Any other contract claiming to be Girasol is fraudulent", "token launch on Solana is coming soon",
+    "token launch on Solana is coming soon",
     "not a guarantee",
     "docs/PRODUCT_STATUS.md",
 ]:
