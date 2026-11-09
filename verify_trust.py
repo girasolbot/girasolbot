@@ -22,8 +22,8 @@ readme = (ROOT / "README.md").read_text()
 for marker in [
     "https://girasolbot.com",
     "https://x.com/girasoleacc",
-    "Any other contract claiming to be Girasol is fraudulent", "token launch on Solana is coming soon",
-    "token launch on Solana is coming soon",
+    "Any other contract claiming to be Girasol is fraudulent", "token launch on Elysium is coming soon",
+    "token launch on Elysium is coming soon",
     "not a guarantee",
     "docs/PRODUCT_STATUS.md",
 ]:

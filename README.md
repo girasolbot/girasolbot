@@ -1,6 +1,5 @@
 # <img src="docs/emblem.png" alt="🌻" width="42" align="top"> Girasol
 
-> 🌻 **Girasol ($GIRASOL) token launch on Solana is coming soon.**
 > 🌻 **Girasol ($GIRASOL) token launch on Elysium is coming soon.**
 > The verified contract addresses will be published here and at the official links below. Any other contract claiming to be Girasol is fraudulent.
 
