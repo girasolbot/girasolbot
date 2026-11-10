@@ -129,13 +129,27 @@ Slot catalog (every slot carries a `network` field: `evm`, `solana` or
 | `zeroslot` | solana | SWQoS |
 | `nozomi` | solana | SWQoS (Temporal) |
 | `zerox` | evm | 0x swap quotes (TS bot) |
-| `dexscreener` | evm | token metadata (TS bot) |
-| `coingecko` | evm | price/metadata (TS bot) |
-| `alchemy` | evm | archive/enhanced RPC (TS bot) |
-| `quicknode` | evm | dedicated RPC (TS bot) |
+| `dexscreener` | evm + elysium | token metadata (TS bot) — Elysium pairs indexed |
+| `coingecko` | evm + elysium | price/metadata (TS bot) — Elysium (Kinetiq) ecosystem supported |
+| `alchemy` | evm + elysium | archive/enhanced RPC (TS bot); **recommended Elysium provider** (RPC + WSS, chain 99901) |
+| `quicknode` | evm + elysium | dedicated RPC (TS bot); Elysium JSON-RPC + WSS supported |
 | `infura` | evm | backup RPC (TS bot) |
-| `explorer` | evm | Blockscout API (TS bot) |
+| `explorer` | evm + elysium | Blockscout API (TS bot) — Elysium explorer is Blockscout-based |
+| `elysium-rpc-http` | elysium | Elysium JSON-RPC reads — public `rpc.elysium.kinetiq.xyz`, dRPC, Alchemy, QuickNode |
+| `elysium-wss` | elysium | Elysium WebSocket block feed (Alchemy WSS / public ws) — single sequencer, no mempool to subscribe to |
+| `elysium-archive` | elysium | archive/enhanced RPC for `eth_getLogs` backfills — caps are tight on public endpoints (blocks are ~100 ms, ranges expire in minutes) |
+| `elysium-explorer` | elysium | Blockscout API on Elysium — decoded txs, token metadata, bridge/graduation tracking |
+| `elysium-bridge` | elysium | HyperEVM <-> Elysium bridge monitor — deposit ~1 min, withdrawal follows challenge period |
 | `helius` | **both** | sender/SWQoS + enhanced RPC — one shared slot |
+
+Elysium-specific notes (Arbitrum Orbit L2 by Kinetiq, chain ID 99901, gas HYPE,
+settles to HyperEVM): ~100 ms blocks, single sequencer with priority-fee
+ordering and **no public mempool** — Solana-style SWQoS slots (`jito`,
+`bloxroute`, `nextblock`, `zeroslot`, `nozomi`) do not apply. Submission is a
+plain `eth_sendRawTransaction`; latency comes from the RPC path, so keep
+`elysium-rpc-http` near the sequencer region and watch receipts by polling.
+HyperCore market-data precompile and keeper lane ship in a network upgrade
+~4 weeks after mainnet launch — HyperCore slots will be added then.
 
 Cross-bot round-trip is covered by a fixed test vector
 (passphrase `roundtrip-test-1234`, slot `alchemy`, value `sk-test-vector-00`):
