@@ -13,9 +13,9 @@
 
 | Chain | Status |
 |---|---|
-| Solana | 🕒 token launch coming soon |
-| EVM (Robinhood Chain, 0x routing) | ✅ live in the TS bot |
-| **Elysium** | 🗓️ **November 9, 2026** — in-bot support ships on this date |
+| Solana | ✅ live |
+| EVM (Robinhood Chain, 0x routing) | ✅ live |
+| **Elysium** | ✅ live |
 | BNB Chain | 🕒 coming soon |
 | Arc | 🕒 coming soon |
 
