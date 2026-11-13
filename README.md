@@ -1,9 +1,11 @@
 # <img src="docs/emblem.png" alt="🌻" width="42" align="top"> Girasol
 
-> 🌻 **Girasol ($GIRASOL) token launch on Elysium is coming soon.**
-> The verified contract addresses will be published here and at the official links below. Any other contract claiming to be Girasol is fraudulent.
+> 🌻 **$GIRASOL is live on Elysium.**
+>
+> **Official Elysium CA:** `0x88e98c9193d5270c574f9f3f362bae5d1149a69c`
+> Any other contract claiming to be Girasol is fraudulent.
 
-[![Token status](https://img.shields.io/badge/Token-SOON-FFD85A?labelColor=03110b&style=for-the-badge&logo=solana&logoColor=0b1a14)](https://girasolbot.com/token)
+[![Elysium CA live](https://img.shields.io/badge/Elysium_CA-live-14F195?labelColor=03110b&style=for-the-badge&logo=ethereum&logoColor=0b1a14)](https://girasolbot.com/token/)
 [![CI](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/girasolbot/girasolbot/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
