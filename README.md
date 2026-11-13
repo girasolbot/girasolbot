@@ -2,7 +2,7 @@
 
 > 🌻 **$GIRASOL is live on Elysium.**
 >
-> **Official Elysium CA:** `0x88e98c9193d5270c574f9f3f362bae5d1149a69c`
+> **Official Elysium CA:** [`0x88e98c9193d5270c574f9f3f362bae5d1149a69c`](https://montramarkets.xyz/token/0x88e98c9193d5270c574f9f3f362bae5d1149a69c) *(click = open on Montra Markets · copy from there)*
 > Any other contract claiming to be Girasol is fraudulent.
 
 [![Elysium CA live](https://img.shields.io/badge/Elysium_CA-live-14F195?labelColor=03110b&style=for-the-badge&logo=ethereum&logoColor=0b1a14)](https://girasolbot.com/token/)
